@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF (modern import name; `fitz` alias kept for readability)
 
 
 class DocumentError(Exception):
