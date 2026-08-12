@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=PDF Viewer & Editor
+GenericName=PDF Editor
+Comment=View and edit PDF documents
+Exec=pdf-editor %f
+Terminal=false
+Categories=Office;Viewer;Graphics;
+MimeType=application/pdf;
+Keywords=PDF;editor;viewer;annotate;

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdf-viewer-editor"
+version = "0.1.0"
+description = "A native Linux PDF viewer and editor (Adobe-Acrobat style) built with PySide6 and PyMuPDF."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Linda Broders" }]
+dependencies = [
+    "PySide6>=6.6",
+    "PyMuPDF>=1.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.gui-scripts]
+pdf-editor = "pdfeditor.main:main"
+
+[tool.setuptools]
+packages = ["pdfeditor"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
