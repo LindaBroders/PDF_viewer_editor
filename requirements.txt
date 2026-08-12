@@ -1,2 +1,6 @@
-PySide6>=6.6
+# PySide6-Essentials provides QtWidgets/QtGui/QtCore — everything this app
+# uses — without the large PySide6-Addons bundle (QtWebEngine, Qt3D, Charts,
+# Multimedia, ...) that the full PySide6 meta-package pulls in. This keeps the
+# download ~175 MB smaller.
+PySide6-Essentials>=6.6
 PyMuPDF>=1.24
