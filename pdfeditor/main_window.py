@@ -55,6 +55,9 @@ class MainWindow(QMainWindow):
         self._scroll.setWidget(self._view)
         self._scroll.setAlignment(Qt.AlignCenter)
         self._scroll.setWidgetResizable(False)
+        # Track scrolling so the page counter and thumbnail highlight follow.
+        self._scroll.verticalScrollBar().valueChanged.connect(self._view.notify_scrolled)
+        self._view.page_changed.connect(self._on_visible_page_changed)
 
         self._thumbs = QListWidget()
         self._thumbs.setFixedWidth(180)
@@ -307,20 +310,21 @@ class MainWindow(QMainWindow):
     def _delete_page(self) -> None:
         if not self._doc:
             return
+        current = self._view.page_index
         try:
-            self._doc.delete_page(self._view.page_index)
+            self._doc.delete_page(current)
         except DocumentError as exc:
             QMessageBox.warning(self, "Delete page", str(exc))
             return
-        new_index = min(self._view.page_index, self._doc.page_count - 1)
-        self._view.set_page(new_index)
+        self._view.refresh()
         self._rebuild_thumbnails()
-        self._update_page_label()
+        self._go_page(min(current, self._doc.page_count - 1))
 
     def _insert_blank_page(self) -> None:
         if not self._doc:
             return
         at = self._doc.insert_blank_page(self._view.page_index + 1)
+        self._view.refresh()
         self._rebuild_thumbnails()
         self._go_page(at)
 
@@ -335,6 +339,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Append failed", str(exc))
             return
+        self._view.refresh()
         self._rebuild_thumbnails()
         self._update_page_label()
 
@@ -989,10 +994,16 @@ class MainWindow(QMainWindow):
     # -- navigation & view ---------------------------------------------
 
     def _go_page(self, index: int) -> None:
+        """Scroll so the given page is at the top of the view."""
         if not self._doc:
             return
         index = max(0, min(index, self._doc.page_count - 1))
-        self._view.set_page(index)
+        self._scroll.verticalScrollBar().setValue(self._view.page_top(index))
+        # The scroll triggers _on_visible_page_changed, which syncs the UI.
+        self._on_visible_page_changed(index)
+
+    def _on_visible_page_changed(self, index: int) -> None:
+        """Update the page counter and thumbnail highlight as pages scroll by."""
         self._thumbs.blockSignals(True)
         self._thumbs.setCurrentRow(index)
         self._thumbs.blockSignals(False)
