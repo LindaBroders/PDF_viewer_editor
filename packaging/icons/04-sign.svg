@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <title>Sign — blue document with fountain-pen nib</title>
+  <rect x="48" y="28" width="140" height="184" rx="12" fill="#ffffff" stroke="#2c3e50" stroke-width="6"/>
+  <path d="M156 28 L188 60 L156 60 Z" fill="#d6eaf8" stroke="#2c3e50" stroke-width="6" stroke-linejoin="round"/>
+  <text x="72" y="90" font-family="Arial, Helvetica, sans-serif" font-size="30" font-weight="800" fill="#2980b9">PDF</text>
+  <path d="M70 168 q30 -34 60 -10 q20 16 44 -18" fill="none" stroke="#2980b9" stroke-width="6" stroke-linecap="round"/>
+  <g transform="rotate(50 176 150)">
+    <path d="M168 96 L184 96 L184 168 L176 184 L168 168 Z" fill="#5dade2" stroke="#2c3e50" stroke-width="3"/>
+    <line x1="176" y1="110" x2="176" y2="164" stroke="#2c3e50" stroke-width="3"/>
+    <circle cx="176" cy="132" r="5" fill="#ffffff" stroke="#2c3e50" stroke-width="2"/>
+  </g>
+</svg>

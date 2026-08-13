@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <title>Viewer — document with magnifier</title>
+  <rect x="44" y="28" width="140" height="184" rx="12" fill="#ffffff" stroke="#34495e" stroke-width="6"/>
+  <path d="M150 28 L184 62 L150 62 Z" fill="#d5dbdb" stroke="#34495e" stroke-width="6" stroke-linejoin="round"/>
+  <rect x="66" y="60" width="90" height="8" rx="4" fill="#aeb6bf"/>
+  <rect x="66" y="80" width="74" height="8" rx="4" fill="#aeb6bf"/>
+  <rect x="66" y="100" width="82" height="8" rx="4" fill="#aeb6bf"/>
+  <circle cx="168" cy="168" r="40" fill="rgba(52,152,219,0.15)" stroke="#2980b9" stroke-width="8"/>
+  <line x1="196" y1="196" x2="226" y2="226" stroke="#2980b9" stroke-width="12" stroke-linecap="round"/>
+  <text x="168" y="178" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="bold" fill="#2980b9" text-anchor="middle">PDF</text>
+</svg>

@@ -110,16 +110,33 @@ pip install -r requirements.txt
 python -m pdfeditor            # optionally pass a PDF path
 ```
 
-### Install as a desktop application
+### Launch by clicking (no terminal)
 
-To get an application-menu entry and make it the default PDF handler:
+Run the installer once — it adds the app to your applications menu **and** puts a
+double-clickable icon on your Desktop:
 
 ```bash
-pip install --user .
-mkdir -p ~/.local/share/applications
-cp packaging/pdf-editor.desktop ~/.local/share/applications/
-update-desktop-database ~/.local/share/applications 2>/dev/null || true
+./packaging/install-desktop.sh              # menu entry + Desktop icon
+./packaging/install-desktop.sh --icon 3     # pick icon option 3 (see below)
+./packaging/install-desktop.sh --no-desktop # menu entry only
+./packaging/install-desktop.sh --uninstall  # remove both
 ```
+
+Then press the **Super** key, type “PDF”, and click **PDF Viewer & Editor** — or
+double-click the icon on your Desktop. (First launch may take a moment while the
+virtualenv builds; after that it opens instantly.)
+
+To make it your default PDF opener: right-click any PDF in **Files → Open With →
+Set as default → PDF Viewer & Editor**.
+
+**App icons.** Six ready-made designs live in `packaging/icons/` (as SVG and PNG).
+Pass `--icon <1-6>` to the installer to choose one, or point `--icon` at your own
+SVG/PNG file.
+
+**Single portable executable (advanced, optional).** If you want one standalone
+file you can copy to another machine, `./packaging/build-executable.sh` bundles the
+whole app (Qt + PDF engine) into `dist/pdf-editor` via PyInstaller. It's large
+(~150 MB); most people should just use the Desktop icon above.
 
 ## Usage
 
