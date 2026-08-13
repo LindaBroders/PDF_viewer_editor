@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import operations as ops
+from . import ai, convert, external, ocr, operations as ops, production, signing
 from .document import DocumentError, PdfDocument
 from .viewer import PageView, Tool
 
@@ -125,13 +125,23 @@ class MainWindow(QMainWindow):
         self.act_encrypt = QAction("&Password Protect (encrypt)…", self, triggered=self._encrypt)
         self.act_search_redact = QAction("Search && &Redact…", self, triggered=self._search_and_redact)
         self.act_sanitize = QAction("&Sanitize (remove hidden data)…", self, triggered=self._sanitize)
+        self.act_make_cert = QAction("Create Self-Signed &Certificate…", self, triggered=self._make_cert)
+        self.act_sign = QAction("Digitally &Sign…", self, triggered=self._sign)
+
+        # Convert / scan / production / AI
+        self.act_office = QAction("Create PDF from &Office File…", self, triggered=self._office_to_pdf)
+        self.act_ocr = QAction("&OCR — Make Searchable…", self, triggered=self._ocr)
+        self.act_pdfa = QAction("Convert to PDF/&A (archival)…", self, triggered=self._to_pdfa)
+        self.act_preflight = QAction("&Preflight (print check)…", self, triggered=self._preflight)
+        self.act_ai_summary = QAction("&Summarize Document", self, triggered=self._ai_summarize)
+        self.act_ai_ask = QAction("&Ask a Question…", self, triggered=self._ai_ask)
 
     def _build_menus(self) -> None:
         mb = self.menuBar()
         m_file = mb.addMenu("&File")
         m_file.addActions([self.act_new, self.act_open, self.act_save, self.act_save_as])
         m_file.addSeparator()
-        m_file.addActions([self.act_combine, self.act_images_to_pdf, self.act_append, self.act_extract])
+        m_file.addActions([self.act_combine, self.act_images_to_pdf, self.act_office, self.act_append, self.act_extract])
         m_file.addSeparator()
         m_file.addActions([self.act_optimize, self.act_split, self.act_compare])
         m_file.addSeparator()
@@ -159,6 +169,14 @@ class MainWindow(QMainWindow):
 
         m_secure = mb.addMenu("&Secure")
         m_secure.addActions([self.act_encrypt, self.act_search_redact, self.act_sanitize])
+        m_secure.addSeparator()
+        m_secure.addActions([self.act_make_cert, self.act_sign])
+
+        m_scan = mb.addMenu("Sca&n")
+        m_scan.addActions([self.act_ocr, self.act_pdfa, self.act_preflight])
+
+        m_ai = mb.addMenu("&AI")
+        m_ai.addActions([self.act_ai_summary, self.act_ai_ask])
 
         m_edit = mb.addMenu("&Tools")
         m_edit.addActions([self.act_search, self.act_add_image, self.act_ink_color])
@@ -668,6 +686,189 @@ class MainWindow(QMainWindow):
             self._on_edited()
             self.statusBar().showMessage("Document sanitized.", 3000)
 
+    # -- convert / scan / production ------------------------------------
+
+    def _office_to_pdf(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose an Office file", "",
+            "Office files (*.doc *.docx *.odt *.rtf *.txt *.xls *.xlsx *.ods *.csv *.ppt *.pptx *.odp);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            out = convert.office_to_pdf(path)
+        except external.DependencyError as exc:
+            self._dep_message(exc)
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Conversion failed", str(exc))
+            return
+        self._offer_open(out, "Converted to PDF.")
+
+    def _require_saved(self, feature: str) -> Optional[str]:
+        """Return the document's path, prompting to save first if needed."""
+        if not self._doc:
+            return None
+        if not self._doc.path or self._doc.dirty:
+            QMessageBox.information(self, feature, "Please save the document first.")
+            return None
+        return self._doc.path
+
+    def _ocr(self) -> None:
+        src = self._require_saved("OCR")
+        if not src:
+            return
+        out, _ = QFileDialog.getSaveFileName(self, "Save searchable PDF as", "", _PDF_FILTER)
+        if not out:
+            return
+        if not out.lower().endswith(".pdf"):
+            out += ".pdf"
+        self.statusBar().showMessage("Running OCR… this can take a while.", 0)
+        try:
+            ocr.ocr_pdf(src, out, deskew=True, clean=True, rotate=True)
+        except external.DependencyError as exc:
+            self.statusBar().clearMessage()
+            self._dep_message(exc)
+            return
+        except Exception as exc:
+            self.statusBar().clearMessage()
+            QMessageBox.critical(self, "OCR failed", str(exc))
+            return
+        self.statusBar().clearMessage()
+        self._offer_open(out, "OCR complete — text is now searchable.")
+
+    def _to_pdfa(self) -> None:
+        src = self._require_saved("PDF/A")
+        if not src:
+            return
+        out, _ = QFileDialog.getSaveFileName(self, "Save PDF/A as", "", _PDF_FILTER)
+        if not out:
+            return
+        if not out.lower().endswith(".pdf"):
+            out += ".pdf"
+        try:
+            ocr.to_pdfa(src, out)
+        except external.DependencyError as exc:
+            self._dep_message(exc)
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "PDF/A conversion failed", str(exc))
+            return
+        self._offer_open(out, "Converted to archival PDF/A.")
+
+    def _preflight(self) -> None:
+        src = self._require_saved("Preflight")
+        if not src:
+            return
+        report = production.preflight(src)
+        self._show_text_report("Preflight — print readiness", report.as_text())
+
+    # -- signing --------------------------------------------------------
+
+    def _make_cert(self) -> None:
+        from PySide6.QtWidgets import QLineEdit
+
+        name, ok = QInputDialog.getText(self, "Self-Signed Certificate", "Your name / identity:")
+        if not ok or not name:
+            return
+        pw, ok = QInputDialog.getText(
+            self, "Self-Signed Certificate", "Set a password for the certificate:", QLineEdit.Password
+        )
+        if not ok or not pw:
+            return
+        out, _ = QFileDialog.getSaveFileName(
+            self, "Save certificate as", "", "Certificate (*.pfx *.p12)"
+        )
+        if not out:
+            return
+        if not (out.lower().endswith(".pfx") or out.lower().endswith(".p12")):
+            out += ".pfx"
+        try:
+            signing.create_self_signed_cert(out, name, pw)
+        except external.DependencyError as exc:
+            self._dep_message(exc)
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Certificate failed", str(exc))
+            return
+        QMessageBox.information(
+            self, "Certificate created",
+            f"Saved {os.path.basename(out)}.\nUse Secure ▸ Digitally Sign with this file.",
+        )
+
+    def _sign(self) -> None:
+        from PySide6.QtWidgets import QLineEdit
+
+        src = self._require_saved("Digital Signature")
+        if not src:
+            return
+        pfx, _ = QFileDialog.getOpenFileName(
+            self, "Choose your certificate", "", "Certificate (*.pfx *.p12)"
+        )
+        if not pfx:
+            return
+        pw, ok = QInputDialog.getText(
+            self, "Digital Signature", "Certificate password:", QLineEdit.Password
+        )
+        if not ok:
+            return
+        reason, _ = QInputDialog.getText(self, "Digital Signature", "Reason (optional):")
+        out, _ = QFileDialog.getSaveFileName(self, "Save signed PDF as", "", _PDF_FILTER)
+        if not out:
+            return
+        if not out.lower().endswith(".pdf"):
+            out += ".pdf"
+        try:
+            signing.sign_pdf(src, out, pfx, pw, reason=reason)
+        except external.DependencyError as exc:
+            self._dep_message(exc)
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Signing failed", str(exc))
+            return
+        self._offer_open(out, "Document digitally signed.")
+
+    # -- AI -------------------------------------------------------------
+
+    def _ai_summarize(self) -> None:
+        if not self._doc:
+            return
+        text = self._all_text()
+        try:
+            result = ai.summarize(text)
+        except external.DependencyError as exc:
+            self._dep_message(exc)
+            return
+        except ai.AIError as exc:
+            QMessageBox.warning(self, "AI Assistant", str(exc))
+            return
+        self._show_text_report("AI Summary", result)
+
+    def _ai_ask(self) -> None:
+        if not self._doc:
+            return
+        question, ok = QInputDialog.getText(self, "Ask about this document", "Your question:")
+        if not ok or not question:
+            return
+        text = self._all_text()
+        try:
+            result = ai.ask(text, question)
+        except external.DependencyError as exc:
+            self._dep_message(exc)
+            return
+        except ai.AIError as exc:
+            QMessageBox.warning(self, "AI Assistant", str(exc))
+            return
+        self._show_text_report(f"AI — {question}", result)
+
+    def _all_text(self) -> str:
+        return "\n\n".join(
+            self._doc.get_text(i) for i in range(self._doc.page_count)
+        )
+
+    def _dep_message(self, exc: external.DependencyError) -> None:
+        QMessageBox.information(self, "Optional feature not installed", str(exc))
+
     # -- helpers --------------------------------------------------------
 
     def _offer_open(self, path: str, message: str) -> None:
@@ -774,6 +975,8 @@ class MainWindow(QMainWindow):
             self.act_link, self.act_attach, self.act_extract_images,
             self.act_add_field, self.act_fill_field, self.act_flatten,
             self.act_encrypt, self.act_search_redact, self.act_sanitize,
+            self.act_ocr, self.act_pdfa, self.act_preflight, self.act_sign,
+            self.act_ai_summary, self.act_ai_ask,
         ):
             act.setEnabled(has)
         self._tool_box.setEnabled(has)

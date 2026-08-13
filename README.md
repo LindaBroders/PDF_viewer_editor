@@ -49,14 +49,39 @@ for Fedora and other distributions. Built with **PySide6 (Qt 6)** for the UI and
 **Compare**
 - Compare two PDF versions and view a **text change report**
 
+**Convert & scan** (needs one extra tool each — see below)
+- **Office → PDF** (Word, Excel, PowerPoint, ODF, …) via LibreOffice
+- **OCR — make scans searchable**, with deskew, clean, and auto-rotate, via OCRmyPDF/Tesseract
+- **Convert to PDF/A** (archival) and run a **print preflight** check
+
+**Sign** (Secure menu)
+- Create a **self-signed certificate** and apply a **digital signature** (optional RFC 3161 timestamp) via pyHanko
+
+**AI Assistant** (AI menu, needs a Claude API key)
+- **Summarize** the document and **ask questions** about its content
+
 **Also**: edit document **metadata** (title, author, …); save (incremental) and Save As.
 
-> **Roadmap** (not yet built): Office→PDF (needs LibreOffice), OCR / scan cleanup
-> (needs Tesseract), PDF/A & preflight (needs Ghostscript), certificate signatures
-> (needs pyHanko), and an optional AI Assistant (needs a Claude API key). Cloud-only
-> Acrobat features — signature-request tracking, shared reviews, AEM rights management,
-> Acrobat Studio / PDF Spaces — require a hosted backend and are out of scope for a
-> local desktop app. See the feature map in the project notes.
+### Optional feature dependencies
+
+The app runs fully without these; each feature shows the exact install command if
+its tool is missing.
+
+```bash
+# System tools (Fedora):
+sudo dnf install libreoffice        # Office → PDF
+sudo dnf install ocrmypdf tesseract # OCR / scan cleanup
+sudo dnf install ghostscript        # PDF/A conversion
+
+# Python packages (signing + AI):
+pip install -r requirements-optional.txt
+export ANTHROPIC_API_KEY=sk-...     # for the AI Assistant
+```
+
+> **Out of scope** — these are cloud services or Adobe-proprietary and can't run as a
+> local desktop app: signature-request tracking / reminders / bulk-send, shared review
+> links, @mentions, web-form response collection (all need a hosted backend), and Adobe
+> Experience Manager rights management / Acrobat Studio / PDF Spaces.
 
 ## Quick start (Fedora)
 

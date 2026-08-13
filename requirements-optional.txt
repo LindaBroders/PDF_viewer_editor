@@ -1,0 +1,17 @@
+# Optional Python packages that unlock advanced features.
+# Install with:  pip install -r requirements-optional.txt
+#
+# Some features also need system tools installed via dnf — see the README:
+#   Office -> PDF        sudo dnf install libreoffice
+#   OCR / scan cleanup   sudo dnf install ocrmypdf tesseract
+#   PDF/A + preflight    sudo dnf install ghostscript
+#
+# The app runs fine without any of these; each feature shows an install hint
+# if its dependency is missing.
+
+# Digital certificate signatures + timestamping
+pyhanko>=0.21
+cryptography>=41
+
+# AI Assistant (also set ANTHROPIC_API_KEY in your environment)
+anthropic>=0.40
