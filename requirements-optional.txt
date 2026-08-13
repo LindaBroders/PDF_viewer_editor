@@ -15,3 +15,6 @@ cryptography>=41
 
 # AI Assistant (also set ANTHROPIC_API_KEY in your environment)
 anthropic>=0.40
+
+# Signature background removal (Insert Signature / Initials)
+Pillow>=9

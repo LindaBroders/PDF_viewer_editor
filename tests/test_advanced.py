@@ -13,7 +13,7 @@ import os
 import pymupdf as fitz
 import pytest
 
-from pdfeditor import external, production
+from pdfeditor import external, imaging, production
 
 
 @pytest.fixture()
@@ -114,3 +114,29 @@ def test_sign_pdf_roundtrip(simple_pdf, tmp_path):
     with fitz.open(out) as doc:
         widgets = list(doc.load_page(0).widgets() or [])
         assert any(w.field_type_string == "Signature" for w in widgets)
+
+
+# -- signature background removal (skips without Pillow) ----------------
+
+@pytest.mark.skipif(not imaging.PILLOW.available(), reason="Pillow not installed")
+def test_signature_background_removal(tmp_path):
+    from PIL import Image, ImageDraw
+
+    src = os.path.join(tmp_path, "sig.jpg")
+    img = Image.new("RGB", (300, 120), (255, 255, 255))  # white background
+    ImageDraw.Draw(img).line([(10, 90), (150, 30), (290, 80)], fill=(10, 10, 40), width=6)
+    img.save(src, "JPEG")
+
+    out = imaging.remove_background(src, os.path.join(tmp_path, "clean.png"))
+    result = Image.open(out)
+    assert result.mode == "RGBA"
+    alpha = list(result.getchannel("A").getdata())
+    assert any(a == 0 for a in alpha)      # background became transparent
+    assert any(a > 200 for a in alpha)     # ink stayed opaque
+    # Cropped tight to the ink (smaller than the original 300x120).
+    assert result.size[0] <= 300 and result.size[1] <= 120
+
+
+def test_signatures_dir_exists():
+    d = imaging.signatures_dir()
+    assert os.path.isdir(d)

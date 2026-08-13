@@ -130,9 +130,14 @@ class PageView(QWidget):
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 (Qt naming)
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(82, 86, 89))
+        painter.fillRect(self.rect(), QColor(64, 71, 81))  # matches theme PAGE_BG
         if not self._pixmap:
             return
+        # Draw a white "sheet" behind the page so transparent PDF areas read as
+        # paper (like a real PDF viewer), with a subtle drop shadow.
+        w, h = self._pixmap.width(), self._pixmap.height()
+        painter.fillRect(3, 4, w, h, QColor(0, 0, 0, 60))       # shadow
+        painter.fillRect(0, 0, w, h, QColor(255, 255, 255))     # paper
         painter.drawPixmap(0, 0, self._pixmap)
 
         # Draw the in-progress selection / stroke overlay.

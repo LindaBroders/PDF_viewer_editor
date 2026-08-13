@@ -9,6 +9,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from .main_window import MainWindow
+from .theme import DARK_QSS
 
 
 def _app_icon() -> QIcon:
@@ -27,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("PDF Viewer & Editor")
     app.setOrganizationName("pdfeditor")
     app.setWindowIcon(_app_icon())
+    app.setStyleSheet(DARK_QSS)
 
     window = MainWindow()
     window.setWindowIcon(app.windowIcon())

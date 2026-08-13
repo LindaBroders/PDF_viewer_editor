@@ -6,7 +6,9 @@ import os
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QColor, QIcon, QImage, QKeySequence, QPixmap
+from PySide6.QtGui import (
+    QAction, QColor, QIcon, QImage, QKeySequence, QPainter, QPixmap,
+)
 from PySide6.QtWidgets import (
     QColorDialog,
     QComboBox,
@@ -22,7 +24,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import ai, convert, external, ocr, operations as ops, production, signing
+from . import (
+    ai, convert, external, imaging, ocr, operations as ops, production, signing,
+)
 from .document import DocumentError, PdfDocument
 from .viewer import PageView, Tool
 
@@ -38,6 +42,9 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
 
         self._doc: Optional[PdfDocument] = None
+        # When set, the next image-placement drag stamps this file (a prepared
+        # signature/initials PNG) instead of prompting for a file.
+        self._pending_signature: Optional[str] = None
 
         self._view = PageView()
         self._view.edited.connect(self._on_edited)
@@ -125,8 +132,9 @@ class MainWindow(QMainWindow):
         self.act_encrypt = QAction("&Password Protect (encrypt)…", self, triggered=self._encrypt)
         self.act_search_redact = QAction("Search && &Redact…", self, triggered=self._search_and_redact)
         self.act_sanitize = QAction("&Sanitize (remove hidden data)…", self, triggered=self._sanitize)
+        self.act_signature = QAction("Insert Si&gnature / Initials…", self, triggered=self._insert_signature)
         self.act_make_cert = QAction("Create Self-Signed &Certificate…", self, triggered=self._make_cert)
-        self.act_sign = QAction("Digitally &Sign…", self, triggered=self._sign)
+        self.act_sign = QAction("Digitally &Sign (certificate)…", self, triggered=self._sign)
 
         # Convert / scan / production / AI
         self.act_office = QAction("Create PDF from &Office File…", self, triggered=self._office_to_pdf)
@@ -168,6 +176,8 @@ class MainWindow(QMainWindow):
         m_forms.addActions([self.act_add_field, self.act_fill_field, self.act_flatten])
 
         m_secure = mb.addMenu("&Secure")
+        m_secure.addAction(self.act_signature)
+        m_secure.addSeparator()
         m_secure.addActions([self.act_encrypt, self.act_search_redact, self.act_sanitize])
         m_secure.addSeparator()
         m_secure.addActions([self.act_make_cert, self.act_sign])
@@ -213,7 +223,8 @@ class MainWindow(QMainWindow):
         tb.addWidget(self._tool_box)
         tb.addSeparator()
         tb.addActions([self.act_rotate_ccw, self.act_rotate_cw, self.act_delete_page])
-        tb.addAction(self.act_search)
+        tb.addSeparator()
+        tb.addActions([self.act_signature, self.act_search])
 
     # -- document lifecycle --------------------------------------------
 
@@ -379,13 +390,19 @@ class MainWindow(QMainWindow):
             return
         rect = (x0, y0, x1, y1)
         if self._view.tool == Tool.IMAGE:
-            path, _ = QFileDialog.getOpenFileName(
-                self, "Insert Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif)"
-            )
-            if path:
-                # Give a zero-size drag a sensible default box.
+            if self._pending_signature:
+                path = self._pending_signature
+                self._pending_signature = None
+                # Default to a signature-sized box for a click/tiny drag.
                 if x1 - x0 < 5 or y1 - y0 < 5:
+                    rect = (x0, y0, x0 + 180, y0 + 60)
+            else:
+                path, _ = QFileDialog.getOpenFileName(
+                    self, "Insert Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif)"
+                )
+                if path and (x1 - x0 < 5 or y1 - y0 < 5):
                     rect = (x0, y0, x0 + 200, y0 + 200)
+            if path:
                 self._doc.add_image(page, rect, path)
         elif self._view.tool == Tool.CROP:
             if x1 - x0 > 5 and y1 - y0 > 5:
@@ -763,6 +780,81 @@ class MainWindow(QMainWindow):
         report = production.preflight(src)
         self._show_text_report("Preflight — print readiness", report.as_text())
 
+    # -- signature / initials image ------------------------------------
+
+    def _insert_signature(self) -> None:
+        """Choose or upload a signature image, then place it on the page."""
+        if not self._doc:
+            return
+        saved = imaging.list_signatures()
+        options = ["📤  Upload a new image…"] + [os.path.basename(p) for p in saved]
+        choice, ok = QInputDialog.getItem(
+            self, "Insert Signature / Initials",
+            "Choose a saved signature, or upload a new one:", options, 0, False
+        )
+        if not ok:
+            return
+
+        if choice.startswith("📤"):
+            path = self._prepare_new_signature()
+            if not path:
+                return
+        else:
+            path = saved[options.index(choice) - 1]
+
+        # Arm placement: next image drag stamps this prepared PNG.
+        self._pending_signature = path
+        self._set_tool(Tool.IMAGE)
+        self._tool_box.setCurrentIndex(self._tool_index(Tool.IMAGE))
+        self.statusBar().showMessage(
+            "Drag a box where you want your signature.", 6000
+        )
+
+    def _prepare_new_signature(self) -> Optional[str]:
+        """Upload an image, optionally remove its background, and save it."""
+        src, _ = QFileDialog.getOpenFileName(
+            self, "Choose a photo/scan of your signature", "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.tiff *.webp)"
+        )
+        if not src:
+            return None
+
+        remove = QMessageBox.question(
+            self, "Remove background",
+            "Remove the background so only the ink shows?\n"
+            "(Recommended for a photo or scan on white paper.)",
+        ) == QMessageBox.Yes
+
+        name, ok = QInputDialog.getText(
+            self, "Save signature", "Name this signature (for reuse):",
+            text="My signature"
+        )
+        if not ok or not name:
+            name = "signature"
+        safe = "".join(c for c in name if c.isalnum() or c in " -_").strip() or "signature"
+        out = os.path.join(imaging.signatures_dir(), f"{safe}.png")
+
+        try:
+            if remove:
+                imaging.remove_background(src, out)
+            else:
+                # Still normalize to PNG so transparency is possible later.
+                from PySide6.QtGui import QImage
+                QImage(src).save(out, "PNG")
+        except external.DependencyError as exc:
+            self._dep_message(exc)
+            return None
+        except Exception as exc:
+            QMessageBox.critical(self, "Signature", f"Could not process image:\n{exc}")
+            return None
+        return out
+
+    def _tool_index(self, tool: Tool) -> int:
+        for i in range(self._tool_box.count()):
+            if self._tool_box.itemData(i) == tool:
+                return i
+        return 0
+
     # -- signing --------------------------------------------------------
 
     def _make_cert(self) -> None:
@@ -958,7 +1050,13 @@ class MainWindow(QMainWindow):
         zoom = 140 / w if w else 0.2
         rp = self._doc.render_page(index, zoom)
         img = QImage(rp.samples, rp.width, rp.height, rp.stride, QImage.Format_RGBA8888)
-        return QIcon(QPixmap.fromImage(img.copy()))
+        # Composite onto a white sheet so the thumbnail reads as paper.
+        base = QPixmap(rp.width, rp.height)
+        base.fill(Qt.white)
+        painter = QPainter(base)
+        painter.drawImage(0, 0, img)
+        painter.end()
+        return QIcon(base)
 
     # -- window state ---------------------------------------------------
 
@@ -976,7 +1074,7 @@ class MainWindow(QMainWindow):
             self.act_add_field, self.act_fill_field, self.act_flatten,
             self.act_encrypt, self.act_search_redact, self.act_sanitize,
             self.act_ocr, self.act_pdfa, self.act_preflight, self.act_sign,
-            self.act_ai_summary, self.act_ai_ask,
+            self.act_ai_summary, self.act_ai_ask, self.act_signature,
         ):
             act.setEnabled(has)
         self._tool_box.setEnabled(has)
