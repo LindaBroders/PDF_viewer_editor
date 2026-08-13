@@ -270,6 +270,334 @@ class PdfDocument:
         page.apply_redactions()
         self.dirty = True
 
+    def search_and_redact(self, text: str) -> int:
+        """Find every occurrence of ``text`` and permanently redact it.
+
+        Returns the number of occurrences removed.
+        """
+        if not text:
+            return 0
+        count = 0
+        for i in range(self.page_count):
+            page = self._page(i)
+            rects = page.search_for(text)
+            for rect in rects:
+                page.add_redact_annot(rect, fill=(0, 0, 0))
+                count += 1
+            if rects:
+                page.apply_redactions()
+        if count:
+            self.dirty = True
+        return count
+
+    def add_stamp(
+        self,
+        index: int,
+        point: tuple[float, float],
+        text: str = "APPROVED",
+        color: tuple[float, float, float] = (0.8, 0, 0),
+        fontsize: float = 14.0,
+    ) -> None:
+        """Add a bordered rubber-stamp-style text mark."""
+        page = self._page(index)
+        x, y = point
+        width = fitz.get_text_length(text, fontsize=fontsize) + 16
+        rect = fitz.Rect(x, y, x + width, y + fontsize + 10)
+        page.draw_rect(rect, color=color, width=1.5)
+        page.insert_text((x + 8, y + fontsize + 2), text, fontsize=fontsize, color=color)
+        self.dirty = True
+
+    # -- page geometry --------------------------------------------------
+
+    def crop_page(
+        self, index: int, rect: tuple[float, float, float, float]
+    ) -> None:
+        """Set the visible crop box of a page (in points)."""
+        page = self._page(index)
+        page.set_cropbox(fitz.Rect(*rect))
+        self.dirty = True
+
+    def replace_page(self, index: int, src_path: str, src_index: int = 0) -> None:
+        """Replace one page with a page from another PDF."""
+        self._validate_index(index)
+        with fitz.open(src_path) as src:
+            self._doc.insert_pdf(
+                src, from_page=src_index, to_page=src_index, start_at=index
+            )
+        # The original page shifted to index + 1; remove it.
+        self._doc.delete_page(index + 1)
+        self.dirty = True
+
+    # -- watermarks / headers / footers / Bates -------------------------
+
+    def add_text_watermark(
+        self,
+        text: str,
+        opacity: float = 0.15,
+        rotate: int = 45,
+        fontsize: float = 48.0,
+        color: tuple[float, float, float] = (0.5, 0.5, 0.5),
+        pages: Optional[list[int]] = None,
+    ) -> None:
+        """Stamp a diagonal, semi-transparent text watermark on pages."""
+        for i in pages if pages is not None else range(self.page_count):
+            page = self._page(i)
+            rect = page.rect
+            pivot = fitz.Point(rect.width / 2, rect.height / 2)
+            matrix = fitz.Matrix(rotate)
+            text_len = fitz.get_text_length(text, fontsize=fontsize)
+            point = fitz.Point((rect.width - text_len) / 2, rect.height / 2)
+            writer = fitz.TextWriter(rect, opacity=opacity, color=color)
+            writer.append(point, text, fontsize=fontsize)
+            writer.write_text(page, morph=(pivot, matrix))
+        self.dirty = True
+
+    def add_image_watermark(
+        self,
+        image_path: str,
+        opacity: float = 0.2,
+        pages: Optional[list[int]] = None,
+    ) -> None:
+        """Place a centered, semi-transparent image watermark on pages."""
+        for i in pages if pages is not None else range(self.page_count):
+            page = self._page(i)
+            rect = page.rect
+            # Center a box covering ~60% of the page width.
+            w = rect.width * 0.6
+            h = rect.height * 0.6
+            box = fitz.Rect(
+                (rect.width - w) / 2,
+                (rect.height - h) / 2,
+                (rect.width + w) / 2,
+                (rect.height + h) / 2,
+            )
+            page.insert_image(box, filename=image_path, overlay=True, keep_proportion=True)
+        self.dirty = True
+
+    def add_header_footer(
+        self,
+        text: str,
+        position: str = "bottom-center",
+        fontsize: float = 9.0,
+        color: tuple[float, float, float] = (0, 0, 0),
+        margin: float = 24.0,
+        pages: Optional[list[int]] = None,
+    ) -> None:
+        """Add a header or footer line at a named position on each page.
+
+        ``position`` is one of top/bottom + left/center/right, e.g.
+        ``"top-right"`` or ``"bottom-center"``. The literal ``{page}`` and
+        ``{pages}`` in ``text`` expand to the current and total page numbers.
+        """
+        total = self.page_count
+        for i in pages if pages is not None else range(total):
+            page = self._page(i)
+            label = text.replace("{page}", str(i + 1)).replace("{pages}", str(total))
+            self._place_text(page, label, position, margin, fontsize, color)
+        self.dirty = True
+
+    def add_bates_numbering(
+        self,
+        prefix: str = "",
+        suffix: str = "",
+        start: int = 1,
+        digits: int = 6,
+        position: str = "bottom-right",
+        fontsize: float = 9.0,
+        color: tuple[float, float, float] = (0, 0, 0),
+    ) -> None:
+        """Apply sequential Bates numbers (e.g. ``ABC000001``) to every page."""
+        number = start
+        for i in range(self.page_count):
+            page = self._page(i)
+            label = f"{prefix}{number:0{digits}d}{suffix}"
+            self._place_text(page, label, position, 24.0, fontsize, color)
+            number += 1
+        self.dirty = True
+
+    def _place_text(self, page, text, position, margin, fontsize, color) -> None:
+        """Insert ``text`` at a named corner/edge of a page."""
+        rect = page.rect
+        text_len = fitz.get_text_length(text, fontsize=fontsize)
+        vert, _, horiz = position.partition("-")
+        if horiz == "left":
+            x = margin
+        elif horiz == "right":
+            x = rect.width - text_len - margin
+        else:  # center
+            x = (rect.width - text_len) / 2
+        y = margin + fontsize if vert == "top" else rect.height - margin
+        page.insert_text((x, y), text, fontsize=fontsize, color=color)
+
+    # -- bookmarks / links / attachments --------------------------------
+
+    def get_bookmarks(self) -> list[list]:
+        """Return the table of contents as ``[level, title, page_number]`` rows."""
+        return self._doc.get_toc()
+
+    def set_bookmarks(self, toc: list[list]) -> None:
+        self._doc.set_toc(toc)
+        self.dirty = True
+
+    def add_bookmark(self, title: str, page: int, level: int = 1) -> None:
+        """Append a bookmark pointing at a page (0-based)."""
+        toc = self._doc.get_toc()
+        toc.append([level, title, page + 1])
+        self._doc.set_toc(toc)
+        self.dirty = True
+
+    def add_link_uri(
+        self, index: int, rect: tuple[float, float, float, float], uri: str
+    ) -> None:
+        """Add a clickable external (web) link over a rectangle."""
+        self._page(index).insert_link(
+            {"kind": fitz.LINK_URI, "from": fitz.Rect(*rect), "uri": uri}
+        )
+        self.dirty = True
+
+    def add_link_goto(
+        self,
+        index: int,
+        rect: tuple[float, float, float, float],
+        target_page: int,
+    ) -> None:
+        """Add an internal link jumping to another page."""
+        self._page(index).insert_link(
+            {"kind": fitz.LINK_GOTO, "from": fitz.Rect(*rect), "page": target_page}
+        )
+        self.dirty = True
+
+    def attach_file(self, file_path: str, name: Optional[str] = None) -> None:
+        """Embed an arbitrary file inside the PDF."""
+        with open(file_path, "rb") as fh:
+            data = fh.read()
+        name = name or os.path.basename(file_path)
+        self._doc.embfile_add(name, data, filename=name)
+        self.dirty = True
+
+    def list_attachments(self) -> list[str]:
+        return list(self._doc.embfile_names())
+
+    def extract_attachment(self, name: str, out_path: str) -> None:
+        data = self._doc.embfile_get(name)
+        with open(out_path, "wb") as fh:
+            fh.write(data)
+
+    # -- images ---------------------------------------------------------
+
+    def extract_images(self, out_dir: str) -> list[str]:
+        """Save every embedded raster image to ``out_dir``. Returns paths."""
+        os.makedirs(out_dir, exist_ok=True)
+        saved: list[str] = []
+        seen: set[int] = set()
+        for i in range(self.page_count):
+            for img in self._page(i).get_images(full=True):
+                xref = img[0]
+                if xref in seen:
+                    continue
+                seen.add(xref)
+                info = self._doc.extract_image(xref)
+                out = os.path.join(out_dir, f"image_{xref}.{info['ext']}")
+                with open(out, "wb") as fh:
+                    fh.write(info["image"])
+                saved.append(out)
+        return saved
+
+    # -- forms ----------------------------------------------------------
+
+    def get_form_fields(self) -> list[dict]:
+        """List all form fields with their page, name, type, and value."""
+        fields: list[dict] = []
+        for i in range(self.page_count):
+            for widget in self._page(i).widgets() or []:
+                fields.append(
+                    {
+                        "page": i,
+                        "name": widget.field_name,
+                        "type": widget.field_type_string,
+                        "value": widget.field_value,
+                    }
+                )
+        return fields
+
+    def fill_form_field(self, name: str, value) -> bool:
+        """Set the value of every field named ``name``. Returns True if found."""
+        found = False
+        for i in range(self.page_count):
+            for widget in self._page(i).widgets() or []:
+                if widget.field_name == name:
+                    widget.field_value = value
+                    widget.update()
+                    found = True
+        if found:
+            self.dirty = True
+        return found
+
+    def add_text_field(
+        self,
+        index: int,
+        rect: tuple[float, float, float, float],
+        name: str,
+        value: str = "",
+    ) -> None:
+        """Add a fillable text form field to a page."""
+        page = self._page(index)
+        widget = fitz.Widget()
+        widget.rect = fitz.Rect(*rect)
+        widget.field_name = name
+        widget.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+        widget.field_value = value
+        page.add_widget(widget)
+        self.dirty = True
+
+    def flatten(self) -> None:
+        """Bake annotations and form fields into the page content (flatten)."""
+        self._doc.bake()
+        self.dirty = True
+
+    # -- sanitize / security -------------------------------------------
+
+    def sanitize(self) -> None:
+        """Remove hidden metadata, JavaScript, and XML metadata."""
+        self._doc.scrub(metadata=True, javascript=True, xml_metadata=True)
+        self._doc.set_metadata({})
+        self.dirty = True
+
+    def save_encrypted(
+        self,
+        path: str,
+        user_pw: str = "",
+        owner_pw: str = "",
+        allow_print: bool = True,
+        allow_copy: bool = True,
+        allow_modify: bool = True,
+        allow_annotate: bool = True,
+    ) -> str:
+        """Save a 256-bit AES encrypted copy with the given permissions.
+
+        ``user_pw`` is required to open the file; ``owner_pw`` (defaults to the
+        user password) governs permission changes.
+        """
+        perm = int(fitz.PDF_PERM_ACCESSIBILITY)
+        if allow_print:
+            perm |= fitz.PDF_PERM_PRINT | fitz.PDF_PERM_PRINT_HQ
+        if allow_copy:
+            perm |= fitz.PDF_PERM_COPY
+        if allow_modify:
+            perm |= fitz.PDF_PERM_MODIFY | fitz.PDF_PERM_ASSEMBLE
+        if allow_annotate:
+            perm |= fitz.PDF_PERM_ANNOTATE | fitz.PDF_PERM_FORM
+        self._doc.save(
+            path,
+            encryption=fitz.PDF_ENCRYPT_AES_256,
+            owner_pw=owner_pw or user_pw,
+            user_pw=user_pw,
+            permissions=perm,
+            garbage=4,
+            deflate=True,
+        )
+        return path
+
     # -- persistence ----------------------------------------------------
 
     def save(self, path: Optional[str] = None) -> str:

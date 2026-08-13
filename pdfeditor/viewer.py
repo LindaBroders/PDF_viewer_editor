@@ -37,6 +37,8 @@ class Tool(Enum):
     INK = auto()         # freehand drawing
     REDACT = auto()      # drag a rectangle to redact
     IMAGE = auto()       # drag a rectangle to place an image
+    CROP = auto()        # drag a rectangle to crop the page
+    LINK = auto()        # drag a rectangle to add a hyperlink
 
 
 class PageView(QWidget):
@@ -44,8 +46,11 @@ class PageView(QWidget):
 
     # Emitted when the user completes an edit that changed the document.
     edited = Signal()
-    # Emitted with a (page, pdf_x, pdf_y) request to place text/note/image.
+    # Emitted with a (page, pdf_x, pdf_y) request to place text/note.
     place_requested = Signal(int, float, float)
+    # Emitted with a (page, x0, y0, x1, y1) rectangle for tools that need the
+    # window to gather more input (crop, link, image placement).
+    rect_selected = Signal(int, float, float, float, float)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -197,7 +202,8 @@ class PageView(QWidget):
         elif self.tool == Tool.INK and len(stroke) > 1:
             pdf_stroke = [self._to_pdf(p) for p in stroke]
             self._doc.add_ink(idx, [pdf_stroke], color=self.ink_color)
-        elif self.tool == Tool.IMAGE:
-            # Image placement is handled by the window (needs a file dialog).
+        elif self.tool in (Tool.IMAGE, Tool.CROP, Tool.LINK):
+            # These need extra input (a file, a confirmation, a URL); the
+            # window handles them from the selected rectangle.
             x0, y0, x1, y1 = self._to_pdf_rect(start, end)
-            self.place_requested.emit(idx, x0, y0)
+            self.rect_selected.emit(idx, x0, y0, x1, y1)

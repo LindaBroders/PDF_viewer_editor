@@ -15,14 +15,48 @@ for Fedora and other distributions. Built with **PySide6 (Qt 6)** for the UI and
 - Full-text search across the document
 - Password-protected (encrypted) PDF support
 
-**Editing**
+**Create & convert** (File menu)
+- **Combine** multiple PDFs and images into one PDF
+- Convert **images → PDF**
+- **Reduce file size** (optimize / recompress)
+
+**Editing & markup**
 - Insert real, selectable **text**
-- **Highlight**, **rectangle**, freehand **draw (ink)**, and **sticky-note** annotations
-- Insert **images**
-- True **redaction** (permanently removes content, not just a black box)
-- **Page management**: insert blank, delete, rotate, reorder, extract, append another PDF
-- Edit document **metadata** (title, author, …)
-- Save (incremental) and Save As
+- **Highlight**, **rectangle**, freehand **draw (ink)**, **sticky-note**, and **stamp** markup
+- Insert and place **images**
+- **Crop** pages (drag a box)
+
+**Organize** (Page / File menus)
+- Insert blank, delete, rotate, reorder, replace, extract, append pages
+- **Split** a document by page count, by bookmarks, or by maximum file size
+
+**Document tools** (Document menu)
+- **Watermarks** (diagonal, semi-transparent text or image)
+- **Headers / footers** with automatic `{page}` / `{pages}` numbering
+- **Bates numbering** (e.g. `ABC000001`) across all pages
+- **Bookmarks**, clickable **web links**, and file **attachments**
+- **Extract all images** from a document
+
+**Forms** (Forms menu)
+- Add fillable **text fields**, auto-detect and **fill** existing fields
+- **Flatten** to bake annotations and fields into the page
+
+**Secure & redact** (Secure menu)
+- **Password protection** with 256-bit AES + permissions
+- True **redaction** and **search-and-redact** (permanent removal)
+- **Sanitize**: strip hidden metadata, JavaScript, and embedded XML
+
+**Compare**
+- Compare two PDF versions and view a **text change report**
+
+**Also**: edit document **metadata** (title, author, …); save (incremental) and Save As.
+
+> **Roadmap** (not yet built): Office→PDF (needs LibreOffice), OCR / scan cleanup
+> (needs Tesseract), PDF/A & preflight (needs Ghostscript), certificate signatures
+> (needs pyHanko), and an optional AI Assistant (needs a Claude API key). Cloud-only
+> Acrobat features — signature-request tracking, shared reviews, AEM rights management,
+> Acrobat Studio / PDF Spaces — require a hosted backend and are out of scope for a
+> local desktop app. See the feature map in the project notes.
 
 ## Quick start (Fedora)
 
