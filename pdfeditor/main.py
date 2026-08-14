@@ -32,7 +32,11 @@ def main(argv: list[str] | None = None) -> int:
     # basename and its StartupWMClass so the taskbar shows our name and icon.
     QGuiApplication.setDesktopFileName("pdf-viewer-editor")
     QApplication.setApplicationName("PDF Viewer & Editor")
-    QApplication.setApplicationDisplayName("PDF Viewer & Editor")
+    # Force an EMPTY display name. Otherwise Qt falls back to the application
+    # name and appends it to every dialog's title bar (e.g.
+    # "Save signature — PDF Viewer & Editor"), making short dialogs too wide.
+    # The taskbar name still comes from the .desktop launcher (desktopFileName).
+    QApplication.setApplicationDisplayName("")
     QApplication.setOrganizationName("pdfeditor")
 
     app = QApplication(argv)
