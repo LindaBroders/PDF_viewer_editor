@@ -241,3 +241,26 @@ def test_compare_text_detects_change(multi_pdf, tmp_path):
 def test_compare_text_identical(multi_pdf):
     report = ops.compare_text(multi_pdf, multi_pdf)
     assert "No text differences" in report
+
+
+def test_snapshot_restore_roundtrip(multi_pdf):
+    """to_bytes()/restore_bytes() power undo/redo."""
+    with PdfDocument.open(multi_pdf) as doc:
+        snapshot = doc.to_bytes()
+        assert doc.page_count == 5
+        doc.delete_page(0)
+        doc.add_text_watermark("DRAFT")
+        assert doc.page_count == 4
+        # Restore the earlier snapshot (undo).
+        doc.restore_bytes(snapshot)
+        assert doc.page_count == 5
+        assert "DRAFT" not in doc.get_text(0)
+
+
+def test_get_words_positions(multi_pdf):
+    with PdfDocument.open(multi_pdf) as doc:
+        words = doc.get_words(0)
+        assert words
+        # Each entry: (x0, y0, x1, y1, word, block, line, word_no)
+        assert len(words[0]) >= 8
+        assert any("SECRET" in w[4] for w in words)

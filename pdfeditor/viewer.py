@@ -57,6 +57,8 @@ class PageView(QWidget):
     rect_selected = Signal(int, float, float, float, float)
     # Emitted when the visible page changes (from scrolling or navigation).
     page_changed = Signal(int)
+    # Emitted just before a drag-based edit is applied (for undo snapshots).
+    edit_started = Signal()
 
     GAP = 18  # pixels of grey between stacked pages
 
@@ -120,7 +122,11 @@ class PageView(QWidget):
         return None
 
     def _update_selection(self, page: dict, start: QPoint, end: QPoint) -> None:
-        """Select the run of words between two points, in reading order."""
+        """Select the run of words between two points (line-aware).
+
+        The start/end anchors snap to the *line* the drag point falls on, so a
+        drag that begins on one line never grabs text from the line above it.
+        """
         if abs(start.x() - end.x()) < 3 and abs(start.y() - end.y()) < 3:
             self.clear_selection()
             return
@@ -129,24 +135,53 @@ class PageView(QWidget):
         if not words:
             self.clear_selection()
             return
-        words = sorted(words, key=lambda w: (w[5], w[6], w[7]))
+
+        # Group words into lines, ordered top-to-bottom; words left-to-right.
+        by_line: dict = {}
+        for w in words:
+            by_line.setdefault((w[5], w[6]), []).append(w)
+        lines = []
+        flat: list = []
+        for key, ws in by_line.items():
+            ws = sorted(ws, key=lambda w: w[0])
+            lines.append({
+                "y0": min(w[1] for w in ws),
+                "y1": max(w[3] for w in ws),
+                "words": ws,
+            })
+        lines.sort(key=lambda L: L["y0"])
+        for L in lines:
+            L["start"] = len(flat)
+            flat.extend(L["words"])
+
         sx, sy = self._to_pdf_on(page, start)
         ex, ey = self._to_pdf_on(page, end)
 
-        def nearest(px: float, py: float) -> int:
-            best, best_d = 0, float("inf")
-            for i, w in enumerate(words):
-                cx, cy = (w[0] + w[2]) / 2, (w[1] + w[3]) / 2
-                d = (cx - px) ** 2 + (cy - py) ** 2
-                if d < best_d:
-                    best, best_d = i, d
-            return best
+        def line_at(py: float) -> dict:
+            for L in lines:
+                if L["y0"] - 2 <= py <= L["y1"] + 2:
+                    return L
+            return min(lines, key=lambda L: abs((L["y0"] + L["y1"]) / 2 - py))
 
-        lo, hi = sorted((nearest(sx, sy), nearest(ex, ey)))
-        chosen = words[lo:hi + 1]
+        def word_in(L: dict, px: float) -> int:
+            ws = L["words"]
+            for j, w in enumerate(ws):
+                if w[0] - 1 <= px <= w[2] + 1:
+                    return j
+            if px <= ws[0][0]:
+                return 0
+            if px >= ws[-1][2]:
+                return len(ws) - 1
+            return min(range(len(ws)), key=lambda j: abs((ws[j][0] + ws[j][2]) / 2 - px))
+
+        ls, le = line_at(sy), line_at(ey)
+        gi = ls["start"] + word_in(ls, sx)
+        gj = le["start"] + word_in(le, ex)
+        lo, hi = sorted((gi, gj))
+        chosen = flat[lo:hi + 1]
+
         self._sel_page = idx
         self._sel_rects = [(w[0], w[1], w[2], w[3]) for w in chosen]
-
         parts: list[str] = []
         prev_line = None
         for w in chosen:
@@ -365,6 +400,7 @@ class PageView(QWidget):
             self.update()
             return
 
+        self.edit_started.emit()  # snapshot pre-edit state for undo
         try:
             self._apply_tool(start, end, stroke)
         finally:

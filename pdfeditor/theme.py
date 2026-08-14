@@ -6,6 +6,13 @@ application-wide from :func:`pdfeditor.main.main`.
 
 from __future__ import annotations
 
+import os
+
+# Path to the drop-down chevron asset (forward slashes for the Qt style sheet).
+_CHEVRON = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "packaging", "icons", "chevron-down.png")
+).replace("\\", "/")
+
 # Palette
 BG = "#2b2f34"          # window background (medium-dark grey)
 SURFACE = "#33383f"     # panels, menus, inputs
@@ -88,10 +95,23 @@ QComboBox {{
     background-color: {SURFACE};
     border: 1px solid {BORDER};
     border-radius: 8px;
-    padding: 6px 10px;
+    padding: 6px 32px 6px 12px;   /* extra right padding for the arrow */
     min-width: 100px;
 }}
 QComboBox:hover {{ border-color: {ACCENT}; }}
+QComboBox:focus {{ border-color: {ACCENT}; }}
+QComboBox::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 26px;
+    border: none;
+    background: transparent;
+}}
+QComboBox::down-arrow {{
+    image: url("{_CHEVRON}");
+    width: 12px;
+    height: 12px;
+}}
 QComboBox QAbstractItemView {{
     background-color: {SURFACE};
     border: 1px solid {BORDER};

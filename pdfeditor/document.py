@@ -633,6 +633,23 @@ class PdfDocument:
         self.dirty = False
         return target
 
+    # -- undo/redo snapshots --------------------------------------------
+
+    def to_bytes(self) -> bytes:
+        """Serialize the whole document to bytes (for an undo snapshot)."""
+        return self._doc.tobytes(deflate=True, garbage=3)
+
+    def restore_bytes(self, data: bytes) -> None:
+        """Replace the current document with a previously saved snapshot."""
+        new = fitz.open("pdf", data)
+        old = self._doc
+        self._doc = new
+        try:
+            old.close()
+        except Exception:
+            pass
+        self.dirty = True
+
     def close(self) -> None:
         try:
             self._doc.close()

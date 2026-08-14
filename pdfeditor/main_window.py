@@ -45,11 +45,16 @@ class MainWindow(QMainWindow):
         # When set, the next image-placement drag stamps this file (a prepared
         # signature/initials PNG) instead of prompting for a file.
         self._pending_signature: Optional[str] = None
+        # Undo/redo history — full-document snapshots (bytes).
+        self._undo: list[bytes] = []
+        self._redo: list[bytes] = []
+        self._max_history = 40
 
         self._view = PageView()
         self._view.edited.connect(self._on_edited)
         self._view.place_requested.connect(self._on_place_requested)
         self._view.rect_selected.connect(self._on_rect_selected)
+        self._view.edit_started.connect(self._checkpoint)
 
         self._scroll = QScrollArea()
         self._scroll.setWidget(self._view)
@@ -90,6 +95,11 @@ class MainWindow(QMainWindow):
         self.act_save = QAction("&Save", self, shortcut=QKeySequence.Save, triggered=self.save_document)
         self.act_save_as = QAction("Save &As…", self, shortcut=QKeySequence.SaveAs, triggered=self.save_document_as)
         self.act_quit = QAction("&Quit", self, shortcut=QKeySequence.Quit, triggered=self.close)
+
+        self.act_undo = QAction("&Undo", self, triggered=self._undo_action)
+        self.act_undo.setShortcut(QKeySequence.Undo)
+        self.act_redo = QAction("&Redo", self, triggered=self._redo_action)
+        self.act_redo.setShortcuts([QKeySequence.Redo, QKeySequence("Ctrl+Y")])
 
         self.act_zoom_in = QAction("Zoom &In", self, shortcut=QKeySequence.ZoomIn, triggered=lambda: self._zoom_by(1.25))
         self.act_zoom_out = QAction("Zoom &Out", self, shortcut=QKeySequence.ZoomOut, triggered=lambda: self._zoom_by(0.8))
@@ -160,6 +170,11 @@ class MainWindow(QMainWindow):
         m_file.addSeparator()
         m_file.addAction(self.act_quit)
 
+        m_editm = mb.addMenu("&Edit")
+        m_editm.addActions([self.act_undo, self.act_redo])
+        m_editm.addSeparator()
+        m_editm.addAction(self.act_copy)
+
         m_view = mb.addMenu("&View")
         m_view.addActions([self.act_zoom_in, self.act_zoom_out, self.act_fit_width])
         m_view.addSeparator()
@@ -201,6 +216,8 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         self.addToolBar(tb)
         tb.addActions([self.act_open, self.act_save])
+        tb.addSeparator()
+        tb.addActions([self.act_undo, self.act_redo])
         tb.addSeparator()
         tb.addActions([self.act_zoom_out, self.act_fit_width, self.act_zoom_in])
         tb.addSeparator()
@@ -294,10 +311,13 @@ class MainWindow(QMainWindow):
         if self._doc:
             self._doc.close()
         self._doc = doc
+        self._undo.clear()
+        self._redo.clear()
         self._view.set_document(doc)
         self._view.fit_width(self._scroll.viewport().width())
         self._rebuild_thumbnails()
         self._update_enabled()
+        self._update_undo_actions()
         self._update_title()
         self._update_page_label()
 
@@ -306,6 +326,7 @@ class MainWindow(QMainWindow):
     def _rotate(self, degrees: int) -> None:
         if not self._doc:
             return
+        self._checkpoint()
         self._doc.rotate_page(self._view.page_index, degrees)
         self._view.refresh()
         self._refresh_current_thumbnail()
@@ -314,9 +335,12 @@ class MainWindow(QMainWindow):
         if not self._doc:
             return
         current = self._view.page_index
+        self._checkpoint()
         try:
             self._doc.delete_page(current)
         except DocumentError as exc:
+            self._undo.pop()  # nothing changed
+            self._update_undo_actions()
             QMessageBox.warning(self, "Delete page", str(exc))
             return
         self._view.refresh()
@@ -326,6 +350,7 @@ class MainWindow(QMainWindow):
     def _insert_blank_page(self) -> None:
         if not self._doc:
             return
+        self._checkpoint()
         at = self._doc.insert_blank_page(self._view.page_index + 1)
         self._view.refresh()
         self._rebuild_thumbnails()
@@ -337,9 +362,12 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Append PDF", "", _PDF_FILTER)
         if not path:
             return
+        self._checkpoint()
         try:
             self._doc.append_pdf(path)
         except Exception as exc:
+            self._undo.pop()
+            self._update_undo_actions()
             QMessageBox.critical(self, "Append failed", str(exc))
             return
         self._view.refresh()
@@ -384,10 +412,12 @@ class MainWindow(QMainWindow):
         if self._view.tool == Tool.TEXT:
             text, ok = QInputDialog.getMultiLineText(self, "Insert Text", "Text:")
             if ok and text:
+                self._checkpoint()
                 self._doc.add_text(page, (x, y + 11), text)
         elif self._view.tool == Tool.NOTE:
             text, ok = QInputDialog.getMultiLineText(self, "Sticky Note", "Note:")
             if ok and text:
+                self._checkpoint()
                 self._doc.add_note(page, (x, y), text)
         self._view.refresh()
         self._on_edited()
@@ -411,13 +441,16 @@ class MainWindow(QMainWindow):
                 if path and (x1 - x0 < 5 or y1 - y0 < 5):
                     rect = (x0, y0, x0 + 200, y0 + 200)
             if path:
+                self._checkpoint()
                 self._doc.add_image(page, rect, path)
         elif self._view.tool == Tool.CROP:
             if x1 - x0 > 5 and y1 - y0 > 5:
+                self._checkpoint()
                 self._doc.crop_page(page, rect)
         elif self._view.tool == Tool.LINK:
             uri, ok = QInputDialog.getText(self, "Add Link", "Web address (URL):", text="https://")
             if ok and uri:
+                self._checkpoint()
                 self._doc.add_link_uri(page, rect, uri)
         # Return to the text-selection tool after a one-shot placement.
         self._tool_box.setCurrentIndex(self._tool_index(Tool.SELECT))
@@ -542,6 +575,7 @@ class MainWindow(QMainWindow):
         text, ok = QInputDialog.getText(self, "Watermark", "Watermark text:", text="CONFIDENTIAL")
         if not ok or not text:
             return
+        self._checkpoint()
         self._doc.add_text_watermark(text)
         self._view.refresh()
         self._rebuild_thumbnails()
@@ -564,6 +598,7 @@ class MainWindow(QMainWindow):
         )
         if not ok:
             return
+        self._checkpoint()
         self._doc.add_header_footer(text, position=pos)
         self._view.refresh()
         self._on_edited()
@@ -577,6 +612,7 @@ class MainWindow(QMainWindow):
         start, ok = QInputDialog.getInt(self, "Bates Numbering", "Start number:", 1, 0, 10_000_000)
         if not ok:
             return
+        self._checkpoint()
         self._doc.add_bates_numbering(prefix=prefix, start=start)
         self._view.refresh()
         self._on_edited()
@@ -586,6 +622,7 @@ class MainWindow(QMainWindow):
             return
         title, ok = QInputDialog.getText(self, "Add Bookmark", "Bookmark title:")
         if ok and title:
+            self._checkpoint()
             self._doc.add_bookmark(title, self._view.page_index)
             self.statusBar().showMessage(f"Bookmark '{title}' added.", 3000)
             self._on_edited()
@@ -595,6 +632,7 @@ class MainWindow(QMainWindow):
             return
         path, _ = QFileDialog.getOpenFileName(self, "Attach a file", "", "All files (*)")
         if path:
+            self._checkpoint()
             self._doc.attach_file(path)
             self.statusBar().showMessage(f"Attached {os.path.basename(path)}.", 3000)
             self._on_edited()
@@ -618,6 +656,7 @@ class MainWindow(QMainWindow):
             return
         # Place a default-sized field near the top of the current page.
         w, _ = self._doc.page_size(self._view.page_index)
+        self._checkpoint()
         self._doc.add_text_field(
             self._view.page_index, (72, 100, min(w - 72, 372), 122), name
         )
@@ -638,6 +677,7 @@ class MainWindow(QMainWindow):
             return
         value, ok = QInputDialog.getText(self, "Fill Form", f"Value for '{name}':")
         if ok:
+            self._checkpoint()
             self._doc.fill_form_field(name, value)
             self._view.refresh()
             self._on_edited()
@@ -650,6 +690,7 @@ class MainWindow(QMainWindow):
             "Flatten annotations and form fields into the page content?\n"
             "This makes edits permanent and non-editable.",
         ) == QMessageBox.Yes:
+            self._checkpoint()
             self._doc.flatten()
             self._view.refresh()
             self._rebuild_thumbnails()
@@ -694,6 +735,7 @@ class MainWindow(QMainWindow):
             f"Permanently remove every occurrence of '{text}'?\nThis cannot be undone after saving.",
         ) != QMessageBox.Yes:
             return
+        self._checkpoint()
         n = self._doc.search_and_redact(text)
         self._view.refresh()
         self._rebuild_thumbnails()
@@ -707,6 +749,7 @@ class MainWindow(QMainWindow):
             self, "Sanitize",
             "Remove hidden metadata, JavaScript, and embedded XML data?",
         ) == QMessageBox.Yes:
+            self._checkpoint()
             self._doc.sanitize()
             self._on_edited()
             self.statusBar().showMessage("Document sanitized.", 3000)
@@ -1041,6 +1084,55 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Copied selected text.", 2000)
         else:
             self.statusBar().showMessage("No text selected — drag with the Select Text tool.", 3000)
+
+    # -- undo / redo ----------------------------------------------------
+
+    def _checkpoint(self) -> None:
+        """Snapshot the document *before* a change, for undo."""
+        if not self._doc:
+            return
+        try:
+            self._undo.append(self._doc.to_bytes())
+        except Exception:
+            return
+        if len(self._undo) > self._max_history:
+            self._undo.pop(0)
+        self._redo.clear()
+        self._update_undo_actions()
+
+    def _undo_action(self) -> None:
+        if not self._doc or not self._undo:
+            return
+        try:
+            self._redo.append(self._doc.to_bytes())
+        except Exception:
+            pass
+        self._restore(self._undo.pop())
+        self.statusBar().showMessage("Undo.", 1500)
+
+    def _redo_action(self) -> None:
+        if not self._doc or not self._redo:
+            return
+        try:
+            self._undo.append(self._doc.to_bytes())
+        except Exception:
+            pass
+        self._restore(self._redo.pop())
+        self.statusBar().showMessage("Redo.", 1500)
+
+    def _restore(self, data: bytes) -> None:
+        current = self._view.page_index
+        self._doc.restore_bytes(data)
+        self._view.refresh()
+        self._rebuild_thumbnails()
+        self._go_page(min(current, self._doc.page_count - 1))
+        self._update_title()
+        self._update_page_label()
+        self._update_undo_actions()
+
+    def _update_undo_actions(self) -> None:
+        self.act_undo.setEnabled(bool(self._doc) and bool(self._undo))
+        self.act_redo.setEnabled(bool(self._doc) and bool(self._redo))
 
     def _on_thumb_selected(self, row: int) -> None:
         if row >= 0:
