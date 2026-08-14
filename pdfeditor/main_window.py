@@ -58,6 +58,7 @@ class MainWindow(QMainWindow):
         self._view.rect_selected.connect(self._on_rect_selected)
         self._view.edit_started.connect(self._checkpoint)
         self._view.area_copied.connect(self._on_area_copied)
+        self._view.signature_placed.connect(self._on_signature_placed)
 
         self._scroll = QScrollArea()
         self._scroll.setWidget(self._view)
@@ -480,18 +481,11 @@ class MainWindow(QMainWindow):
             return
         rect = (x0, y0, x1, y1)
         if self._view.tool == Tool.IMAGE:
-            if self._pending_signature:
-                path = self._pending_signature
-                self._pending_signature = None
-                # Default to a signature-sized box for a click/tiny drag.
-                if x1 - x0 < 5 or y1 - y0 < 5:
-                    rect = (x0, y0, x0 + 180, y0 + 60)
-            else:
-                path, _ = QFileDialog.getOpenFileName(
-                    self, "Insert Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif)"
-                )
-                if path and (x1 - x0 < 5 or y1 - y0 < 5):
-                    rect = (x0, y0, x0 + 200, y0 + 200)
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Insert Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif)"
+            )
+            if path and (x1 - x0 < 5 or y1 - y0 < 5):
+                rect = (x0, y0, x0 + 200, y0 + 200)
             if path:
                 self._checkpoint()
                 self._doc.add_image(page, rect, path)
@@ -920,13 +914,30 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        # Arm placement: next image drag stamps this prepared PNG.
+        # Enter interactive placement: the signature follows the cursor.
+        from PySide6.QtGui import QPixmap
+
+        pix = QPixmap(path)
+        if pix.isNull():
+            QMessageBox.warning(self, "Signature", "Could not load that image.")
+            return
         self._pending_signature = path
-        self._set_tool(Tool.IMAGE)
-        self._tool_box.setCurrentIndex(self._tool_index(Tool.IMAGE))
+        self._view.begin_placement(pix)
         self.statusBar().showMessage(
-            "Now drag a box on the page where the signature should go.", 8000
+            "Move the signature into place and click to drop it. Then drag it or "
+            "its corners to adjust, and click outside (or press Enter) to finish.",
+            0,
         )
+
+    def _on_signature_placed(self, idx: int, x0: float, y0: float, x1: float, y1: float) -> None:
+        if not self._doc or not self._pending_signature:
+            return
+        self._checkpoint()
+        self._doc.add_image(idx, (x0, y0, x1, y1), self._pending_signature)
+        self._pending_signature = None
+        self._view.refresh()
+        self._on_edited()
+        self.statusBar().showMessage("Signature placed.", 3000)
 
     def _prepare_new_signature(self) -> Optional[str]:
         """Upload an image, optionally remove its background, and save it."""

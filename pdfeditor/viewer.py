@@ -62,6 +62,9 @@ class PageView(QWidget):
     edit_started = Signal()
     # Emitted after a snapshot (Copy Area as Image) completes.
     area_copied = Signal()
+    # Emitted when a signature/image placement is committed:
+    # (page_index, x0, y0, x1, y1) in PDF points.
+    signature_placed = Signal(int, float, float, float, float)
 
     GAP = 18  # pixels of grey between stacked pages
 
@@ -88,6 +91,15 @@ class PageView(QWidget):
         self._drag_now: Optional[QPoint] = None
         self._ink_stroke: list[QPoint] = []
         self._active: Optional[dict] = None  # page a drag started on
+
+        # Interactive image/signature placement.
+        self._place_pix: Optional[QPixmap] = None
+        self._place_rect: Optional[QRect] = None      # widget pixels
+        self._place_following = False                 # rides the cursor until dropped
+        self._place_page: Optional[dict] = None
+        self._place_mode: Optional[str] = None        # None | "move" | "resize"
+        self._place_corner = -1
+        self._place_grab: Optional[QPoint] = None
 
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -126,6 +138,93 @@ class PageView(QWidget):
             return None
         x, y = self._to_pdf_on(page, pos)
         return page["index"], x, y
+
+    # -- interactive image / signature placement ------------------------
+
+    HANDLE = 9  # corner handle size (px)
+
+    def begin_placement(self, pixmap: QPixmap) -> None:
+        """Start placing an image: it follows the cursor until clicked."""
+        if pixmap.isNull():
+            return
+        self._place_pix = pixmap
+        w = 200
+        h = max(20, round(pixmap.height() * w / max(1, pixmap.width())))
+        region = self.visibleRegion().boundingRect()
+        cx = region.center().x() if not region.isEmpty() else self.width() // 2
+        cy = region.center().y() if not region.isEmpty() else self.height() // 2
+        self._place_rect = QRect(cx - w // 2, cy - h // 2, w, h)
+        self._place_following = True
+        self._place_mode = None
+        self._place_page = None
+        self.setCursor(Qt.CrossCursor)
+        self.setFocus()
+        self.update()
+
+    def _placing(self) -> bool:
+        return self._place_pix is not None and self._place_rect is not None
+
+    def _place_handles(self) -> list:
+        r = self._place_rect
+        s = self.HANDLE
+        return [
+            QRect(r.left() - s // 2, r.top() - s // 2, s, s),
+            QRect(r.right() - s // 2, r.top() - s // 2, s, s),
+            QRect(r.right() - s // 2, r.bottom() - s // 2, s, s),
+            QRect(r.left() - s // 2, r.bottom() - s // 2, s, s),
+        ]
+
+    def _corner_at(self, pt: QPoint) -> int:
+        for i, h in enumerate(self._place_handles()):
+            if h.adjusted(-3, -3, 3, 3).contains(pt):
+                return i
+        return -1
+
+    def _resize_placement(self, pt: QPoint) -> None:
+        r = self._place_rect
+        corners = [r.topLeft(), r.topRight(), r.bottomRight(), r.bottomLeft()]
+        anchor = corners[(self._place_corner + 2) % 4]  # opposite corner stays put
+        ar = self._place_pix.width() / max(1, self._place_pix.height())
+        w = max(20, abs(pt.x() - anchor.x()))
+        h = max(20, abs(pt.y() - anchor.y()))
+        # Keep the signature's aspect ratio.
+        if w / h > ar:
+            w = int(h * ar)
+        else:
+            h = int(w / ar)
+        sx = 1 if pt.x() >= anchor.x() else -1
+        sy = 1 if pt.y() >= anchor.y() else -1
+        self._place_rect = QRect(
+            anchor, QPoint(anchor.x() + sx * w, anchor.y() + sy * h)
+        ).normalized()
+
+    def _commit_placement(self) -> None:
+        if not self._placing():
+            return
+        r = self._place_rect
+        page = self._place_page or self._hit_test(r.center())
+        if page is None:
+            # Fall back to the page nearest the box center vertically.
+            cy = r.center().y()
+            page = min(self._pages, key=lambda p: abs((p["y"] + p["h"] / 2) - cy)) if self._pages else None
+        pix = self._place_pix
+        self._cancel_placement()
+        if page is None:
+            return
+        x0 = (r.left() - page["x"]) / self._zoom
+        y0 = (r.top() - page["y"]) / self._zoom
+        x1 = (r.right() - page["x"]) / self._zoom
+        y1 = (r.bottom() - page["y"]) / self._zoom
+        self.signature_placed.emit(page["index"], x0, y0, x1, y1)
+
+    def _cancel_placement(self) -> None:
+        self._place_pix = None
+        self._place_rect = None
+        self._place_following = False
+        self._place_mode = None
+        self._place_page = None
+        self.setCursor(Qt.IBeamCursor if self.tool == Tool.SELECT else Qt.ArrowCursor)
+        self.update()
 
     def copy_selection(self) -> bool:
         """Copy the selected text to the clipboard. Returns True if any."""
@@ -371,12 +470,43 @@ class PageView(QWidget):
                     painter.fillRect(rect, QColor(255, 235, 60, 90))
                 painter.drawRect(rect)
 
+        # Image/signature placement overlay.
+        if self._placing():
+            painter.setOpacity(0.65 if self._place_following else 1.0)
+            painter.drawPixmap(self._place_rect, self._place_pix)
+            painter.setOpacity(1.0)
+            if not self._place_following:
+                painter.setPen(QPen(QColor(0, 120, 215), 1, Qt.DashLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(self._place_rect)
+                for h in self._place_handles():
+                    painter.fillRect(h, QColor(0, 120, 215))
+
     # -- mouse handling -------------------------------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if not self._doc or event.button() != Qt.LeftButton:
             return
         pos = event.position().toPoint()
+
+        # Placement mode intercepts all mouse handling.
+        if self._placing():
+            if self._place_following:
+                self._place_following = False   # drop it here
+                self._place_page = self._hit_test(self._place_rect.center())
+                self.update()
+                return
+            corner = self._corner_at(pos)
+            if corner >= 0:
+                self._place_mode = "resize"
+                self._place_corner = corner
+            elif self._place_rect.contains(pos):
+                self._place_mode = "move"
+                self._place_grab = pos - self._place_rect.topLeft()
+            else:
+                self._commit_placement()   # click outside = place it for good
+            return
+
         page = self._hit_test(pos)
         if page is None:
             return
@@ -403,6 +533,9 @@ class PageView(QWidget):
         self.update()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._placing():
+            self._commit_placement()
+            return
         if not self._doc or event.button() != Qt.LeftButton or self.tool != Tool.SELECT:
             super().mouseDoubleClickEvent(event)
             return
@@ -419,6 +552,19 @@ class PageView(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._placing():
+            pos = event.position().toPoint()
+            if self._place_following:
+                self._place_rect.moveCenter(pos)
+                self._place_page = self._hit_test(pos)
+                self.update()
+            elif self._place_mode == "move":
+                self._place_rect.moveTopLeft(pos - self._place_grab)
+                self.update()
+            elif self._place_mode == "resize":
+                self._resize_placement(pos)
+                self.update()
+            return
         if self._drag_start is None:
             return
         pos = event.position().toPoint()
@@ -430,6 +576,10 @@ class PageView(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._placing():
+            self._place_mode = None
+            self._place_grab = None
+            return
         if not self._doc or self._drag_start is None or self._active is None:
             return
         start = self._drag_start
@@ -464,6 +614,13 @@ class PageView(QWidget):
             self.edited.emit()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if self._placing():
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self._commit_placement()
+                return
+            if event.key() == Qt.Key_Escape:
+                self._cancel_placement()
+                return
         if event.matches(QKeySequence.Copy) and self.copy_selection():
             return
         if event.key() == Qt.Key_Escape and self._sel_rects:
