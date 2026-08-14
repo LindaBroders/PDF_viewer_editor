@@ -890,27 +890,42 @@ class MainWindow(QMainWindow):
         if not self._doc:
             return
         saved = imaging.list_signatures()
-        options = ["📤  Upload a new image…"] + [os.path.basename(p) for p in saved]
-        choice, ok = QInputDialog.getItem(
-            self, "Insert Signature / Initials",
-            "Choose a saved signature, or upload a new one:", options, 0, False
-        )
-        if not ok:
-            return
 
-        if choice.startswith("📤"):
+        if not saved:
+            # First time: go straight to the file picker — no dropdown.
             path = self._prepare_new_signature()
-            if not path:
-                return
         else:
-            path = saved[options.index(choice) - 1]
+            # Offer a clear choice between uploading and reusing a saved one.
+            box = QMessageBox(self)
+            box.setWindowTitle("Insert Signature / Initials")
+            box.setText("Upload a new signature image, or use a saved one?")
+            upload_btn = box.addButton("Upload New Image…", QMessageBox.AcceptRole)
+            saved_btn = box.addButton("Use Saved…", QMessageBox.ActionRole)
+            box.addButton(QMessageBox.Cancel)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked == upload_btn:
+                path = self._prepare_new_signature()
+            elif clicked == saved_btn:
+                names = [os.path.basename(p) for p in saved]
+                name, ok = QInputDialog.getItem(
+                    self, "Saved Signatures", "Choose a signature:", names, 0, False
+                )
+                if not ok:
+                    return
+                path = saved[names.index(name)]
+            else:
+                return
+
+        if not path:
+            return
 
         # Arm placement: next image drag stamps this prepared PNG.
         self._pending_signature = path
         self._set_tool(Tool.IMAGE)
         self._tool_box.setCurrentIndex(self._tool_index(Tool.IMAGE))
         self.statusBar().showMessage(
-            "Drag a box where you want your signature.", 6000
+            "Now drag a box on the page where the signature should go.", 8000
         )
 
     def _prepare_new_signature(self) -> Optional[str]:
