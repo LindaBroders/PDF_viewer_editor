@@ -80,6 +80,7 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self._build_toolbar()
         self._update_enabled()
+        self._set_tool(Tool.SELECT)  # start with the text-selection cursor
 
     # -- UI construction ------------------------------------------------
 
@@ -106,6 +107,7 @@ class MainWindow(QMainWindow):
         self.act_extract = QAction("E&xtract Current Page…", self, triggered=self._extract_page)
 
         self.act_search = QAction("&Find…", self, shortcut=QKeySequence.Find, triggered=self._search)
+        self.act_copy = QAction("&Copy Selected Text", self, shortcut=QKeySequence.Copy, triggered=self._copy_text)
         self.act_add_image = QAction("Insert &Image…", self, triggered=lambda: self._set_tool(Tool.IMAGE))
         self.act_ink_color = QAction("Drawing &Color…", self, triggered=self._pick_ink_color)
 
@@ -192,7 +194,7 @@ class MainWindow(QMainWindow):
         m_ai.addActions([self.act_ai_summary, self.act_ai_ask])
 
         m_edit = mb.addMenu("&Tools")
-        m_edit.addActions([self.act_search, self.act_add_image, self.act_ink_color])
+        m_edit.addActions([self.act_copy, self.act_search, self.act_add_image, self.act_ink_color])
 
     def _build_toolbar(self) -> None:
         tb = QToolBar("Main")
@@ -208,7 +210,8 @@ class MainWindow(QMainWindow):
         # Tool selector.
         self._tool_box = QComboBox()
         for label, tool in [
-            ("Hand", Tool.HAND),
+            ("Select Text", Tool.SELECT),
+            ("Hand (pan)", Tool.HAND),
             ("Text", Tool.TEXT),
             ("Sticky Note", Tool.NOTE),
             ("Highlight", Tool.HIGHLIGHT),
@@ -416,8 +419,8 @@ class MainWindow(QMainWindow):
             uri, ok = QInputDialog.getText(self, "Add Link", "Web address (URL):", text="https://")
             if ok and uri:
                 self._doc.add_link_uri(page, rect, uri)
-        self._view.tool = Tool.HAND
-        self._tool_box.setCurrentIndex(0)
+        # Return to the text-selection tool after a one-shot placement.
+        self._tool_box.setCurrentIndex(self._tool_index(Tool.SELECT))
         self._view.refresh()
         self._on_edited()
 
@@ -1026,6 +1029,18 @@ class MainWindow(QMainWindow):
 
     def _set_tool(self, tool: Tool) -> None:
         self._view.tool = tool
+        if tool == Tool.SELECT:
+            self._view.setCursor(Qt.IBeamCursor)
+        elif tool == Tool.HAND:
+            self._view.setCursor(Qt.OpenHandCursor)
+        else:
+            self._view.setCursor(Qt.CrossCursor)
+
+    def _copy_text(self) -> None:
+        if self._view.copy_selection():
+            self.statusBar().showMessage("Copied selected text.", 2000)
+        else:
+            self.statusBar().showMessage("No text selected — drag with the Select Text tool.", 3000)
 
     def _on_thumb_selected(self, row: int) -> None:
         if row >= 0:

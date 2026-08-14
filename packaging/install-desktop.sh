@@ -59,6 +59,7 @@ Terminal=false
 Categories=Office;Viewer;Graphics;
 MimeType=application/pdf;
 Keywords=PDF;editor;viewer;annotate;
+StartupWMClass=pdf-viewer-editor
 EOF
 }
 

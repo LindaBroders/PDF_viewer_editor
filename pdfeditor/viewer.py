@@ -16,13 +16,15 @@ from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QImage,
+    QKeyEvent,
+    QKeySequence,
     QMouseEvent,
     QPainter,
     QPaintEvent,
     QPen,
     QPixmap,
 )
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 from .document import PdfDocument
 
@@ -31,6 +33,7 @@ class Tool(Enum):
     """The currently selected interaction tool."""
 
     HAND = auto()        # pan / scroll, no edit
+    SELECT = auto()      # drag to select text (copy with Ctrl+C)
     TEXT = auto()        # click to place text
     NOTE = auto()        # click to place a sticky note
     HIGHLIGHT = auto()   # drag a rectangle to highlight
@@ -61,8 +64,13 @@ class PageView(QWidget):
         super().__init__(parent)
         self._doc: Optional[PdfDocument] = None
         self._zoom = 1.0
-        self.tool = Tool.HAND
+        self.tool = Tool.SELECT  # most PDFs have selectable text
         self.ink_color: tuple[float, float, float] = (1, 0, 0)
+
+        # Text selection state.
+        self._sel_page = -1
+        self._sel_rects: list[tuple[float, float, float, float]] = []  # PDF coords
+        self._sel_text = ""
 
         # Per-page layout + cached render: list of dicts
         #   {index, x, y, w, h, pixmap}
@@ -83,9 +91,71 @@ class PageView(QWidget):
     def set_document(self, doc: Optional[PdfDocument]) -> None:
         self._doc = doc
         self._last_current = -1
+        self.clear_selection()
         self.rebuild()
         if doc:
             self.page_changed.emit(0)
+
+    # -- text selection -------------------------------------------------
+
+    def clear_selection(self) -> None:
+        self._sel_page = -1
+        self._sel_rects = []
+        self._sel_text = ""
+
+    def has_selection(self) -> bool:
+        return bool(self._sel_text)
+
+    def copy_selection(self) -> bool:
+        """Copy the selected text to the clipboard. Returns True if any."""
+        if self._sel_text:
+            QApplication.clipboard().setText(self._sel_text)
+            return True
+        return False
+
+    def _page_layout(self, index: int) -> Optional[dict]:
+        for pg in self._pages:
+            if pg["index"] == index:
+                return pg
+        return None
+
+    def _update_selection(self, page: dict, start: QPoint, end: QPoint) -> None:
+        """Select the run of words between two points, in reading order."""
+        if abs(start.x() - end.x()) < 3 and abs(start.y() - end.y()) < 3:
+            self.clear_selection()
+            return
+        idx = page["index"]
+        words = self._doc.get_words(idx)
+        if not words:
+            self.clear_selection()
+            return
+        words = sorted(words, key=lambda w: (w[5], w[6], w[7]))
+        sx, sy = self._to_pdf_on(page, start)
+        ex, ey = self._to_pdf_on(page, end)
+
+        def nearest(px: float, py: float) -> int:
+            best, best_d = 0, float("inf")
+            for i, w in enumerate(words):
+                cx, cy = (w[0] + w[2]) / 2, (w[1] + w[3]) / 2
+                d = (cx - px) ** 2 + (cy - py) ** 2
+                if d < best_d:
+                    best, best_d = i, d
+            return best
+
+        lo, hi = sorted((nearest(sx, sy), nearest(ex, ey)))
+        chosen = words[lo:hi + 1]
+        self._sel_page = idx
+        self._sel_rects = [(w[0], w[1], w[2], w[3]) for w in chosen]
+
+        parts: list[str] = []
+        prev_line = None
+        for w in chosen:
+            line = (w[5], w[6])
+            if prev_line is not None:
+                parts.append("\n" if line != prev_line else " ")
+            parts.append(w[4])
+            prev_line = line
+        self._sel_text = "".join(parts)
 
     def set_zoom(self, zoom: float) -> None:
         self._zoom = max(0.1, min(zoom, 8.0))
@@ -209,8 +279,24 @@ class PageView(QWidget):
             painter.fillRect(x, y, w, h, QColor(255, 255, 255))          # paper
             painter.drawPixmap(x, y, pg["pixmap"])
 
-        # In-progress selection / stroke overlay (widget coordinates).
-        if self._drag_start and self._drag_now:
+        # Text-selection highlight (blue over selected words).
+        if self._sel_rects:
+            pg = self._page_layout(self._sel_page)
+            if pg:
+                sel_color = QColor(51, 153, 255, 80)
+                for x0, y0, x1, y1 in self._sel_rects:
+                    painter.fillRect(
+                        QRectF(
+                            pg["x"] + x0 * self._zoom,
+                            pg["y"] + y0 * self._zoom,
+                            (x1 - x0) * self._zoom,
+                            (y1 - y0) * self._zoom,
+                        ),
+                        sel_color,
+                    )
+
+        # In-progress marquee / ink overlay (not for pan/select tools).
+        if self._drag_start and self._drag_now and self.tool not in (Tool.HAND, Tool.SELECT):
             pen = QPen(QColor(0, 120, 215), 1, Qt.DashLine)
             painter.setPen(pen)
             if self.tool == Tool.INK and len(self._ink_stroke) > 1:
@@ -236,6 +322,12 @@ class PageView(QWidget):
         if self.tool == Tool.HAND:
             self._active = None  # let the scroll area handle panning
             return
+        if self.tool == Tool.SELECT:
+            self.clear_selection()
+            self._drag_start = pos
+            self._drag_now = pos
+            self.update()
+            return
         if self.tool in (Tool.TEXT, Tool.NOTE):
             x, y = self._to_pdf_on(page, pos)
             self.place_requested.emit(page["index"], x, y)
@@ -254,6 +346,8 @@ class PageView(QWidget):
         self._drag_now = pos
         if self.tool == Tool.INK:
             self._ink_stroke.append(pos)
+        elif self.tool == Tool.SELECT and self._active is not None:
+            self._update_selection(self._active, self._drag_start, pos)
         self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -266,11 +360,25 @@ class PageView(QWidget):
         stroke = self._ink_stroke
         self._ink_stroke = []
 
+        if self.tool == Tool.SELECT:
+            self._update_selection(self._active, start, end)
+            self.update()
+            return
+
         try:
             self._apply_tool(start, end, stroke)
         finally:
             self.refresh_active_page()
             self.edited.emit()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if event.matches(QKeySequence.Copy) and self.copy_selection():
+            return
+        if event.key() == Qt.Key_Escape and self._sel_rects:
+            self.clear_selection()
+            self.update()
+            return
+        super().keyPressEvent(event)
 
     def _apply_tool(self, start: QPoint, end: QPoint, stroke: list[QPoint]) -> None:
         page = self._active

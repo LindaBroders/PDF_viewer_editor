@@ -117,6 +117,14 @@ class PdfDocument:
         """Extract the plain text of a page."""
         return self._page(index).get_text("text")
 
+    def get_words(self, index: int) -> list:
+        """Return the page's words with positions.
+
+        Each entry is ``(x0, y0, x1, y1, word, block_no, line_no, word_no)`` in
+        PDF points — used by the viewer for interactive text selection.
+        """
+        return self._page(index).get_text("words")
+
     # -- search ---------------------------------------------------------
 
     def search(self, needle: str, page: Optional[int] = None) -> list[SearchHit]:

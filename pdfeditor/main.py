@@ -26,7 +26,12 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     app = QApplication(argv)
     app.setApplicationName("PDF Viewer & Editor")
+    app.setApplicationDisplayName("PDF Viewer & Editor")
     app.setOrganizationName("pdfeditor")
+    # Associate the window with the installed launcher so the taskbar shows the
+    # app's name and icon (not "python3"). Must match the .desktop file's
+    # basename (pdf-viewer-editor.desktop) and its StartupWMClass.
+    app.setDesktopFileName("pdf-viewer-editor")
     app.setWindowIcon(_app_icon())
     app.setStyleSheet(DARK_QSS)
 
