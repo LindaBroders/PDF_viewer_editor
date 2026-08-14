@@ -73,6 +73,7 @@ class PageView(QWidget):
         self._sel_page = -1
         self._sel_rects: list[tuple[float, float, float, float]] = []  # PDF coords
         self._sel_text = ""
+        self._layout_cache: dict = {}  # page index -> (flat_words, lines)
 
         # Per-page layout + cached render: list of dicts
         #   {index, x, y, w, h, pixmap}
@@ -121,65 +122,50 @@ class PageView(QWidget):
                 return pg
         return None
 
-    def _update_selection(self, page: dict, start: QPoint, end: QPoint) -> None:
-        """Select the run of words between two points (line-aware).
+    def _word_layout(self, idx: int):
+        """Return (flat_words, lines) for a page, grouped into reading lines.
 
-        The start/end anchors snap to the *line* the drag point falls on, so a
-        drag that begins on one line never grabs text from the line above it.
+        ``lines`` are ordered top-to-bottom, each with words left-to-right and a
+        ``start`` global index into ``flat_words``. Cached per page.
         """
-        if abs(start.x() - end.x()) < 3 and abs(start.y() - end.y()) < 3:
-            self.clear_selection()
-            return
-        idx = page["index"]
+        if idx in self._layout_cache:
+            return self._layout_cache[idx]
         words = self._doc.get_words(idx)
-        if not words:
-            self.clear_selection()
-            return
-
-        # Group words into lines, ordered top-to-bottom; words left-to-right.
         by_line: dict = {}
         for w in words:
             by_line.setdefault((w[5], w[6]), []).append(w)
         lines = []
-        flat: list = []
-        for key, ws in by_line.items():
+        for ws in by_line.values():
             ws = sorted(ws, key=lambda w: w[0])
-            lines.append({
-                "y0": min(w[1] for w in ws),
-                "y1": max(w[3] for w in ws),
-                "words": ws,
-            })
+            lines.append({"y0": min(w[1] for w in ws),
+                          "y1": max(w[3] for w in ws), "words": ws})
         lines.sort(key=lambda L: L["y0"])
+        flat: list = []
         for L in lines:
             L["start"] = len(flat)
             flat.extend(L["words"])
+        self._layout_cache[idx] = (flat, lines)
+        return flat, lines
 
-        sx, sy = self._to_pdf_on(page, start)
-        ex, ey = self._to_pdf_on(page, end)
+    def _anchor_index(self, lines: list, px: float, py: float) -> int:
+        """Global word index nearest a PDF point (snaps to the point's line)."""
+        line = next((L for L in lines if L["y0"] - 2 <= py <= L["y1"] + 2), None)
+        if line is None:
+            line = min(lines, key=lambda L: abs((L["y0"] + L["y1"]) / 2 - py))
+        ws = line["words"]
+        for j, w in enumerate(ws):
+            if w[0] - 1 <= px <= w[2] + 1:
+                return line["start"] + j
+        if px <= ws[0][0]:
+            return line["start"]
+        if px >= ws[-1][2]:
+            return line["start"] + len(ws) - 1
+        j = min(range(len(ws)), key=lambda j: abs((ws[j][0] + ws[j][2]) / 2 - px))
+        return line["start"] + j
 
-        def line_at(py: float) -> dict:
-            for L in lines:
-                if L["y0"] - 2 <= py <= L["y1"] + 2:
-                    return L
-            return min(lines, key=lambda L: abs((L["y0"] + L["y1"]) / 2 - py))
-
-        def word_in(L: dict, px: float) -> int:
-            ws = L["words"]
-            for j, w in enumerate(ws):
-                if w[0] - 1 <= px <= w[2] + 1:
-                    return j
-            if px <= ws[0][0]:
-                return 0
-            if px >= ws[-1][2]:
-                return len(ws) - 1
-            return min(range(len(ws)), key=lambda j: abs((ws[j][0] + ws[j][2]) / 2 - px))
-
-        ls, le = line_at(sy), line_at(ey)
-        gi = ls["start"] + word_in(ls, sx)
-        gj = le["start"] + word_in(le, ex)
+    def _apply_range(self, idx: int, flat: list, gi: int, gj: int) -> None:
         lo, hi = sorted((gi, gj))
         chosen = flat[lo:hi + 1]
-
         self._sel_page = idx
         self._sel_rects = [(w[0], w[1], w[2], w[3]) for w in chosen]
         parts: list[str] = []
@@ -191,6 +177,29 @@ class PageView(QWidget):
             parts.append(w[4])
             prev_line = line
         self._sel_text = "".join(parts)
+
+    def _update_selection(self, page: dict, start: QPoint, end: QPoint) -> None:
+        """Select whole words between two points (line-aware, word granularity)."""
+        idx = page["index"]
+        flat, lines = self._word_layout(idx)
+        if not flat:
+            self.clear_selection()
+            return
+        sx, sy = self._to_pdf_on(page, start)
+        ex, ey = self._to_pdf_on(page, end)
+        self._apply_range(idx, flat, self._anchor_index(lines, sx, sy),
+                          self._anchor_index(lines, ex, ey))
+
+    def _select_word(self, page: dict, pos: QPoint) -> None:
+        """Select the single word under a point (for double-click)."""
+        idx = page["index"]
+        flat, lines = self._word_layout(idx)
+        if not flat:
+            self.clear_selection()
+            return
+        px, py = self._to_pdf_on(page, pos)
+        gi = self._anchor_index(lines, px, py)
+        self._apply_range(idx, flat, gi, gi)
 
     def set_zoom(self, zoom: float) -> None:
         self._zoom = max(0.1, min(zoom, 8.0))
@@ -245,6 +254,7 @@ class PageView(QWidget):
     def rebuild(self) -> None:
         """Render every page at the current zoom and lay them out vertically."""
         self._pages = []
+        self._layout_cache.clear()  # page text layout may have changed
         if not self._doc:
             self.setMinimumSize(0, 0)
             self.resize(0, 0)
@@ -374,6 +384,22 @@ class PageView(QWidget):
             self._ink_stroke = [pos]
         self.update()
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if not self._doc or event.button() != Qt.LeftButton or self.tool != Tool.SELECT:
+            super().mouseDoubleClickEvent(event)
+            return
+        pos = event.position().toPoint()
+        page = self._hit_test(pos)
+        if page is None:
+            return
+        self._active = page
+        self._select_word(page, pos)
+        # Keep the drag anchored at the double-clicked word so a subsequent drag
+        # extends the selection word by word.
+        self._drag_start = pos
+        self._drag_now = pos
+        self.update()
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._drag_start is None:
             return
@@ -396,7 +422,12 @@ class PageView(QWidget):
         self._ink_stroke = []
 
         if self.tool == Tool.SELECT:
-            self._update_selection(self._active, start, end)
+            moved = abs(start.x() - end.x()) >= 3 or abs(start.y() - end.y()) >= 3
+            if moved:
+                # A drag: recompute the word range from anchor to release point.
+                self._update_selection(self._active, start, end)
+            # A plain click with no drag keeps whatever is selected (empty after
+            # a single click's press-clear, or the word from a double-click).
             self.update()
             return
 
