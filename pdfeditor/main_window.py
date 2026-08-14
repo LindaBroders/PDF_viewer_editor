@@ -58,7 +58,7 @@ class MainWindow(QMainWindow):
         self._view.rect_selected.connect(self._on_rect_selected)
         self._view.edit_started.connect(self._checkpoint)
         self._view.area_copied.connect(self._on_area_copied)
-        self._view.signature_placed.connect(self._on_signature_placed)
+        self._view.objects_changed.connect(self._on_objects_changed)
 
         self._scroll = QScrollArea()
         self._scroll.setWidget(self._view)
@@ -335,7 +335,11 @@ class MainWindow(QMainWindow):
         if not self._doc.path:
             return self.save_document_as()
         try:
-            self._doc.save()
+            overlays = self._view.overlay_objects()
+            if overlays:
+                self._doc.save_with_overlays(self._doc.path, overlays)
+            else:
+                self._doc.save()
         except DocumentError as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
             return False
@@ -352,7 +356,11 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith(".pdf"):
             path += ".pdf"
         try:
-            self._doc.save(path)
+            overlays = self._view.overlay_objects()
+            if overlays:
+                self._doc.save_with_overlays(path, overlays)
+            else:
+                self._doc.save(path)
         except DocumentError as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
             return False
@@ -376,9 +384,21 @@ class MainWindow(QMainWindow):
 
     # -- editing actions ------------------------------------------------
 
+    def _bake_objects(self) -> None:
+        """Stamp placed objects into the document before a structural edit that
+        would otherwise invalidate their page/coordinate references."""
+        overlays = self._view.overlay_objects()
+        if not overlays:
+            return
+        self._doc.stamp_images(overlays)
+        self._view.clear_objects()
+        self._view.refresh()
+        self._rebuild_thumbnails()
+
     def _rotate(self, degrees: int) -> None:
         if not self._doc:
             return
+        self._bake_objects()
         self._checkpoint()
         self._doc.rotate_page(self._view.page_index, degrees)
         self._view.refresh()
@@ -388,6 +408,7 @@ class MainWindow(QMainWindow):
         if not self._doc:
             return
         current = self._view.page_index
+        self._bake_objects()
         self._checkpoint()
         try:
             self._doc.delete_page(current)
@@ -403,6 +424,7 @@ class MainWindow(QMainWindow):
     def _insert_blank_page(self) -> None:
         if not self._doc:
             return
+        self._bake_objects()
         self._checkpoint()
         at = self._doc.insert_blank_page(self._view.page_index + 1)
         self._view.refresh()
@@ -415,6 +437,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Append PDF", "", _PDF_FILTER)
         if not path:
             return
+        self._bake_objects()
         self._checkpoint()
         try:
             self._doc.append_pdf(path)
@@ -491,6 +514,7 @@ class MainWindow(QMainWindow):
                 self._doc.add_image(page, rect, path)
         elif self._view.tool == Tool.CROP:
             if x1 - x0 > 5 and y1 - y0 > 5:
+                self._bake_objects()
                 self._checkpoint()
                 self._doc.crop_page(page, rect)
         elif self._view.tool == Tool.LINK:
@@ -736,6 +760,7 @@ class MainWindow(QMainWindow):
             "Flatten annotations and form fields into the page content?\n"
             "This makes edits permanent and non-editable.",
         ) == QMessageBox.Yes:
+            self._bake_objects()
             self._checkpoint()
             self._doc.flatten()
             self._view.refresh()
@@ -921,23 +946,18 @@ class MainWindow(QMainWindow):
         if pix.isNull():
             QMessageBox.warning(self, "Signature", "Could not load that image.")
             return
-        self._pending_signature = path
-        self._view.begin_placement(pix)
+        self._view.begin_placement(pix, path)
         self.statusBar().showMessage(
-            "Move the signature into place and click to drop it. Then drag it or "
-            "its corners to adjust, and click outside (or press Enter) to finish.",
+            "Move the signature and click to drop it. Afterwards you can drag it "
+            "to move, drag a corner to resize, or press Delete to remove it.",
             0,
         )
 
-    def _on_signature_placed(self, idx: int, x0: float, y0: float, x1: float, y1: float) -> None:
-        if not self._doc or not self._pending_signature:
-            return
-        self._checkpoint()
-        self._doc.add_image(idx, (x0, y0, x1, y1), self._pending_signature)
-        self._pending_signature = None
-        self._view.refresh()
-        self._on_edited()
-        self.statusBar().showMessage("Signature placed.", 3000)
+    def _on_objects_changed(self) -> None:
+        """A placed image/signature was added, moved, resized, or deleted."""
+        if self._doc:
+            self._doc.dirty = True
+        self._update_title()
 
     def _prepare_new_signature(self) -> Optional[str]:
         """Upload an image, optionally remove its background, and save it."""
@@ -1151,10 +1171,12 @@ class MainWindow(QMainWindow):
 
     def _set_tool(self, tool: Tool) -> None:
         self._view.tool = tool
-        if tool == Tool.SELECT:
-            self._view.setCursor(Qt.IBeamCursor)
-        elif tool == Tool.HAND:
+        # Base cursor; in Select mode hover refines it to I-beam over text,
+        # move/resize over a placed object, and plain arrow otherwise.
+        if tool == Tool.HAND:
             self._view.setCursor(Qt.OpenHandCursor)
+        elif tool == Tool.SELECT:
+            self._view.setCursor(Qt.ArrowCursor)
         else:
             self._view.setCursor(Qt.CrossCursor)
 
@@ -1389,6 +1411,7 @@ class MainWindow(QMainWindow):
         menu.exec(self._thumbs.mapToGlobal(pos))
 
     def _rotate_page_at(self, row: int, degrees: int) -> None:
+        self._bake_objects()
         self._checkpoint()
         self._doc.rotate_page(row, degrees)
         self._view.refresh()
@@ -1398,6 +1421,7 @@ class MainWindow(QMainWindow):
         self._on_edited()
 
     def _delete_page_at(self, row: int) -> None:
+        self._bake_objects()
         self._checkpoint()
         try:
             self._doc.delete_page(row)

@@ -223,6 +223,37 @@ class PdfDocument:
         page.insert_image(fitz.Rect(*rect), filename=image_path)
         self.dirty = True
 
+    def stamp_images(self, overlays: list) -> None:
+        """Permanently stamp a list of overlay images into the document.
+
+        Each overlay is ``{"page", "rect": [x0,y0,x1,y1], "path"}``.
+        """
+        for o in overlays:
+            self._page(o["page"]).insert_image(
+                fitz.Rect(*o["rect"]), filename=o["path"], keep_proportion=True
+            )
+        if overlays:
+            self.dirty = True
+
+    def save_with_overlays(self, path: str, overlays: list) -> str:
+        """Save a copy with overlay images stamped in, without baking them into
+        the live document (so they stay editable in the session)."""
+        if not overlays:
+            return self.save(path)
+        data = self._doc.tobytes()
+        out = fitz.open("pdf", data)
+        try:
+            for o in overlays:
+                out.load_page(o["page"]).insert_image(
+                    fitz.Rect(*o["rect"]), filename=o["path"], keep_proportion=True
+                )
+            out.save(path, garbage=4, deflate=True)
+        finally:
+            out.close()
+        self.path = path
+        self.dirty = False
+        return path
+
     def add_highlight(
         self, index: int, rect: tuple[float, float, float, float]
     ) -> None:
