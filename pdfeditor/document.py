@@ -230,6 +230,20 @@ class PdfDocument:
         page.add_highlight_annot(fitz.Rect(*rect))
         self.dirty = True
 
+    def add_underline(
+        self, index: int, rect: tuple[float, float, float, float]
+    ) -> None:
+        page = self._page(index)
+        page.add_underline_annot(fitz.Rect(*rect))
+        self.dirty = True
+
+    def add_strikeout(
+        self, index: int, rect: tuple[float, float, float, float]
+    ) -> None:
+        page = self._page(index)
+        page.add_strikeout_annot(fitz.Rect(*rect))
+        self.dirty = True
+
     def add_ink(
         self,
         index: int,

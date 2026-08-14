@@ -12,7 +12,7 @@ from __future__ import annotations
 from enum import Enum, auto
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -43,6 +43,7 @@ class Tool(Enum):
     IMAGE = auto()       # drag a rectangle to place an image / signature
     CROP = auto()        # drag a rectangle to crop the page
     LINK = auto()        # drag a rectangle to add a hyperlink
+    SNAPSHOT = auto()    # drag a rectangle to copy that area as an image
 
 
 class PageView(QWidget):
@@ -59,6 +60,8 @@ class PageView(QWidget):
     page_changed = Signal(int)
     # Emitted just before a drag-based edit is applied (for undo snapshots).
     edit_started = Signal()
+    # Emitted after a snapshot (Copy Area as Image) completes.
+    area_copied = Signal()
 
     GAP = 18  # pixels of grey between stacked pages
 
@@ -112,6 +115,9 @@ class PageView(QWidget):
     def selection(self) -> tuple[int, list]:
         """Return (page_index, [word rects in PDF coords]) for the selection."""
         return self._sel_page, list(self._sel_rects)
+
+    def selected_text(self) -> str:
+        return self._sel_text
 
     def point_to_page(self, pos: QPoint):
         """Map a widget point to (page_index, pdf_x, pdf_y), or None if off-page."""
@@ -443,6 +449,13 @@ class PageView(QWidget):
             self.update()
             return
 
+        if self.tool == Tool.SNAPSHOT:
+            self._copy_area(start, end)
+            self._drag_now = None
+            self.update()
+            self.area_copied.emit()
+            return
+
         self.edit_started.emit()  # snapshot pre-edit state for undo
         try:
             self._apply_tool(start, end, stroke)
@@ -459,11 +472,37 @@ class PageView(QWidget):
             return
         super().keyPressEvent(event)
 
+    def _copy_area(self, start: QPoint, end: QPoint) -> None:
+        """Copy the dragged rectangle of the rendered page to the clipboard."""
+        rect = QRect(start, end).normalized()
+        if rect.width() < 4 or rect.height() < 4:
+            return
+        QApplication.clipboard().setPixmap(self.grab(rect))
+
+    def _words_between(self, page: dict, start: QPoint, end: QPoint) -> list:
+        """Word rectangles between two points (empty if the page has no text)."""
+        idx = page["index"]
+        flat, lines = self._word_layout(idx)
+        if not flat:
+            return []
+        sx, sy = self._to_pdf_on(page, start)
+        ex, ey = self._to_pdf_on(page, end)
+        gi = self._anchor_index(lines, sx, sy)
+        gj = self._anchor_index(lines, ex, ey)
+        lo, hi = sorted((gi, gj))
+        return [(w[0], w[1], w[2], w[3]) for w in flat[lo:hi + 1]]
+
     def _apply_tool(self, start: QPoint, end: QPoint, stroke: list[QPoint]) -> None:
         page = self._active
         idx = page["index"]
         if self.tool == Tool.HIGHLIGHT:
-            self._doc.add_highlight(idx, self._to_pdf_rect_on(page, start, end))
+            # Word-aware: snap to words on a text page; rectangle on a scan.
+            rects = self._words_between(page, start, end)
+            if rects:
+                for r in rects:
+                    self._doc.add_highlight(idx, r)
+            else:
+                self._doc.add_highlight(idx, self._to_pdf_rect_on(page, start, end))
         elif self.tool == Tool.RECT:
             self._doc.add_rect_annot(idx, self._to_pdf_rect_on(page, start, end))
         elif self.tool == Tool.REDACT:

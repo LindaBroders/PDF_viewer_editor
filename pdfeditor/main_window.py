@@ -56,6 +56,7 @@ class MainWindow(QMainWindow):
         self._view.place_requested.connect(self._on_place_requested)
         self._view.rect_selected.connect(self._on_rect_selected)
         self._view.edit_started.connect(self._checkpoint)
+        self._view.area_copied.connect(self._on_area_copied)
 
         self._scroll = QScrollArea()
         self._scroll.setWidget(self._view)
@@ -74,6 +75,8 @@ class MainWindow(QMainWindow):
         self._thumbs.setFixedWidth(180)
         self._thumbs.setIconSize(QPixmap(140, 180).size())
         self._thumbs.currentRowChanged.connect(self._on_thumb_selected)
+        self._thumbs.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._thumbs.customContextMenuRequested.connect(self._thumb_context_menu)
 
         central = QWidget()
         from PySide6.QtWidgets import QHBoxLayout
@@ -100,6 +103,7 @@ class MainWindow(QMainWindow):
         self.act_open = QAction("&Open…", self, shortcut=QKeySequence.Open, triggered=self.open_document)
         self.act_save = QAction("&Save", self, shortcut=QKeySequence.Save, triggered=self.save_document)
         self.act_save_as = QAction("Save &As…", self, shortcut=QKeySequence.SaveAs, triggered=self.save_document_as)
+        self.act_print = QAction("&Print…", self, shortcut=QKeySequence.Print, triggered=self._print)
         self.act_quit = QAction("&Quit", self, shortcut=QKeySequence.Quit, triggered=self.close)
 
         self.act_undo = QAction("&Undo", self, triggered=self._undo_action)
@@ -168,7 +172,7 @@ class MainWindow(QMainWindow):
     def _build_menus(self) -> None:
         mb = self.menuBar()
         m_file = mb.addMenu("&File")
-        m_file.addActions([self.act_new, self.act_open, self.act_save, self.act_save_as])
+        m_file.addActions([self.act_new, self.act_open, self.act_save, self.act_save_as, self.act_print])
         m_file.addSeparator()
         m_file.addActions([self.act_combine, self.act_images_to_pdf, self.act_office, self.act_append, self.act_extract])
         m_file.addSeparator()
@@ -217,11 +221,35 @@ class MainWindow(QMainWindow):
         m_edit = mb.addMenu("&Tools")
         m_edit.addActions([self.act_copy, self.act_search, self.act_add_image, self.act_ink_color])
 
+    def _assign_icons(self) -> None:
+        """Give toolbar actions theme icons and a hover tooltip."""
+        icons = {
+            self.act_open: "document-open", self.act_save: "document-save",
+            self.act_save_as: "document-save-as", self.act_print: "document-print",
+            self.act_undo: "edit-undo", self.act_redo: "edit-redo",
+            self.act_zoom_in: "zoom-in", self.act_zoom_out: "zoom-out",
+            self.act_fit_width: "zoom-fit-best", self.act_prev: "go-previous",
+            self.act_next: "go-next", self.act_rotate_cw: "object-rotate-right",
+            self.act_rotate_ccw: "object-rotate-left", self.act_delete_page: "edit-delete",
+            self.act_signature: "document-edit", self.act_search: "edit-find",
+        }
+        for act, name in icons.items():
+            ic = QIcon.fromTheme(name)
+            if not ic.isNull():
+                act.setIcon(ic)
+            # Hover tooltip = the action's label (mnemonics/ellipsis stripped).
+            act.setToolTip(act.text().replace("&", "").replace("…", ""))
+
     def _build_toolbar(self) -> None:
+        self._assign_icons()
         tb = QToolBar("Main")
         tb.setMovable(False)
+        # Icons + hover tooltips where an icon theme exists (Fedora/GNOME); fall
+        # back to text-beside-icon on systems without one so buttons stay legible.
+        has_icons = not QIcon.fromTheme("edit-undo").isNull()
+        tb.setToolButtonStyle(Qt.ToolButtonIconOnly if has_icons else Qt.ToolButtonTextBesideIcon)
         self.addToolBar(tb)
-        tb.addActions([self.act_open, self.act_save])
+        tb.addActions([self.act_open, self.act_save, self.act_save_as, self.act_print])
         tb.addSeparator()
         tb.addActions([self.act_undo, self.act_redo])
         tb.addSeparator()
@@ -1126,7 +1154,13 @@ class MainWindow(QMainWindow):
         if self._view.has_selection():
             menu.addAction("Copy", self._copy_text)
             menu.addAction("Highlight Selection", self._highlight_selection)
+            menu.addAction("Underline Selection", self._underline_selection)
+            menu.addAction("Strikethrough Selection", self._strikeout_selection)
             menu.addAction("Redact Selection", self._redact_selection)
+            menu.addSeparator()
+            menu.addAction("Search for Selection", self._search_selection)
+            menu.addAction("Explain Selection (AI)", self._ai_explain_selection)
+            menu.addAction("Translate Selection (AI)…", self._ai_translate_selection)
             menu.addSeparator()
 
         if hit is not None:
@@ -1136,6 +1170,10 @@ class MainWindow(QMainWindow):
             menu.addAction("Insert Signature / Initials…", self._insert_signature)
             menu.addSeparator()
 
+        menu.addAction("Copy Area as Image", self._start_snapshot)
+        menu.addAction("Add Bookmark Here…", self._add_bookmark)
+        menu.addAction("Extract This Page…", self._extract_page)
+        menu.addSeparator()
         menu.addActions([self.act_undo, self.act_redo])
         menu.addSeparator()
         menu.addActions([self.act_zoom_in, self.act_zoom_out, self.act_fit_width])
@@ -1194,6 +1232,148 @@ class MainWindow(QMainWindow):
             return
         QGuiApplication.clipboard().setText(self._doc.get_text(self._view.page_index))
         self.statusBar().showMessage("Copied page text.", 2000)
+
+    def _underline_selection(self) -> None:
+        self._markup_selection(self._doc.add_underline if self._doc else None)
+
+    def _strikeout_selection(self) -> None:
+        self._markup_selection(self._doc.add_strikeout if self._doc else None)
+
+    def _markup_selection(self, method) -> None:
+        page, rects = self._view.selection()
+        if not rects or method is None:
+            return
+        self._checkpoint()
+        for r in rects:
+            method(page, r)
+        self._view.clear_selection()
+        self._view.refresh()
+        self._on_edited()
+
+    def _search_selection(self) -> None:
+        needle = self._view.selected_text().split("\n")[0].strip()
+        if not needle:
+            return
+        hits = self._doc.search(needle)
+        if not hits:
+            self.statusBar().showMessage("No matches.", 3000)
+            return
+        self._go_page(hits[0].page)
+        self.statusBar().showMessage(f"{len(hits)} match(es) for '{needle}'.", 5000)
+
+    def _ai_explain_selection(self) -> None:
+        text = self._view.selected_text()
+        try:
+            result = ai.explain(text)
+        except external.DependencyError as exc:
+            self._dep_message(exc)
+            return
+        except ai.AIError as exc:
+            QMessageBox.warning(self, "AI Assistant", str(exc))
+            return
+        self._show_text_report("Explain selection", result)
+
+    def _ai_translate_selection(self) -> None:
+        text = self._view.selected_text()
+        lang, ok = QInputDialog.getText(self, "Translate", "Target language:", text="English")
+        if not ok or not lang:
+            return
+        try:
+            result = ai.translate(text, lang)
+        except external.DependencyError as exc:
+            self._dep_message(exc)
+            return
+        except ai.AIError as exc:
+            QMessageBox.warning(self, "AI Assistant", str(exc))
+            return
+        self._show_text_report(f"Translation ({lang})", result)
+
+    def _start_snapshot(self) -> None:
+        self._set_tool(Tool.SNAPSHOT)
+        self.statusBar().showMessage("Drag a box to copy that area as an image.", 6000)
+
+    def _on_area_copied(self) -> None:
+        self._tool_box.setCurrentIndex(self._tool_index(Tool.SELECT))
+        self.statusBar().showMessage("Area copied to clipboard.", 2500)
+
+    # -- printing -------------------------------------------------------
+
+    def _print(self) -> None:
+        if not self._doc:
+            return
+        try:
+            from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+        except Exception:
+            QMessageBox.information(self, "Print", "Printing support isn't available in this build.")
+            return
+        printer = QPrinter(QPrinter.HighResolution)
+        if QPrintDialog(printer, self).exec() != QPrintDialog.Accepted:
+            return
+        painter = QPainter(printer)
+        zoom = min(max(printer.resolution() / 72.0, 1.0), 3.0)
+        for i in range(self._doc.page_count):
+            if i > 0:
+                printer.newPage()
+            rp = self._doc.render_page(i, zoom)
+            img = QImage(rp.samples, rp.width, rp.height, rp.stride, QImage.Format_RGBA8888).copy()
+            vp = painter.viewport()
+            scaled = img.scaled(vp.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            painter.drawImage(
+                vp.x() + (vp.width() - scaled.width()) // 2,
+                vp.y() + (vp.height() - scaled.height()) // 2,
+                scaled,
+            )
+        painter.end()
+        self.statusBar().showMessage("Sent to printer.", 3000)
+
+    # -- thumbnail right-click ------------------------------------------
+
+    def _thumb_context_menu(self, pos) -> None:
+        if not self._doc:
+            return
+        item = self._thumbs.itemAt(pos)
+        if item is None:
+            return
+        row = self._thumbs.row(item)
+        menu = QMenu(self)
+        menu.addAction("Rotate Right", lambda: self._rotate_page_at(row, 90))
+        menu.addAction("Rotate Left", lambda: self._rotate_page_at(row, -90))
+        menu.addSeparator()
+        menu.addAction("Delete Page", lambda: self._delete_page_at(row))
+        menu.addAction("Extract Page…", lambda: self._extract_page_at(row))
+        menu.exec(self._thumbs.mapToGlobal(pos))
+
+    def _rotate_page_at(self, row: int, degrees: int) -> None:
+        self._checkpoint()
+        self._doc.rotate_page(row, degrees)
+        self._view.refresh()
+        item = self._thumbs.item(row)
+        if item:
+            item.setIcon(self._thumbnail_icon(row))
+        self._on_edited()
+
+    def _delete_page_at(self, row: int) -> None:
+        self._checkpoint()
+        try:
+            self._doc.delete_page(row)
+        except DocumentError as exc:
+            self._undo.pop()
+            self._update_undo_actions()
+            QMessageBox.warning(self, "Delete page", str(exc))
+            return
+        self._view.refresh()
+        self._rebuild_thumbnails()
+        self._go_page(min(row, self._doc.page_count - 1))
+        self._on_edited()
+
+    def _extract_page_at(self, row: int) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Extract Page As", "", _PDF_FILTER)
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        self._doc.extract_pages([row], path)
+        self.statusBar().showMessage(f"Extracted page {row + 1}.", 3000)
 
     # -- undo / redo ----------------------------------------------------
 
@@ -1291,7 +1471,8 @@ class MainWindow(QMainWindow):
     def _update_enabled(self) -> None:
         has = self._doc is not None
         for act in (
-            self.act_save, self.act_save_as, self.act_zoom_in, self.act_zoom_out,
+            self.act_save, self.act_save_as, self.act_print,
+            self.act_zoom_in, self.act_zoom_out,
             self.act_fit_width, self.act_prev, self.act_next, self.act_goto,
             self.act_insert_page, self.act_delete_page, self.act_rotate_cw,
             self.act_rotate_ccw, self.act_append, self.act_extract, self.act_search,

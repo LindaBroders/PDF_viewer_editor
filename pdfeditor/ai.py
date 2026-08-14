@@ -64,6 +64,31 @@ def summarize(document_text: str) -> str:
     )
 
 
+def explain(text: str) -> str:
+    """Define / explain a short selection of text."""
+    text = text.strip()
+    if not text:
+        raise AIError("Nothing selected.")
+    return _ask_claude(
+        system="You define and briefly explain the given text or term in plain language.",
+        user_text=f"Define and explain the following, briefly:\n\n{text}",
+        max_tokens=600,
+    )
+
+
+def translate(text: str, target_language: str = "English") -> str:
+    """Translate a selection into the target language."""
+    text = text.strip()
+    if not text:
+        raise AIError("Nothing selected.")
+    return _ask_claude(
+        system=f"You are a translator. Translate the user's text into {target_language}. "
+        "Return only the translation.",
+        user_text=text,
+        max_tokens=800,
+    )
+
+
 def ask(document_text: str, question: str) -> str:
     """Answer a question grounded in the document's text."""
     text = document_text[:_MAX_CHARS]
