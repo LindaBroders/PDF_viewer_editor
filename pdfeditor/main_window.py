@@ -1093,6 +1093,7 @@ class MainWindow(QMainWindow):
 
         dlg = QDialog(self)
         dlg.setWindowTitle(title)
+        dlg.setProperty("resizable", True)  # keep this one user-resizable
         dlg.resize(700, 500)
         layout = QVBoxLayout(dlg)
         view = QPlainTextEdit()
