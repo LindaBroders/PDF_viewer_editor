@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication
 
 from .main_window import MainWindow
@@ -24,14 +24,18 @@ def _app_icon() -> QIcon:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
+
+    # Set the app identity BEFORE constructing QApplication, so Qt registers the
+    # right app ID with the desktop portal the first time (setting it afterwards
+    # triggers a harmless "Connection already associated with an application ID"
+    # warning on Wayland). Must match the installed pdf-viewer-editor.desktop
+    # basename and its StartupWMClass so the taskbar shows our name and icon.
+    QGuiApplication.setDesktopFileName("pdf-viewer-editor")
+    QApplication.setApplicationName("PDF Viewer & Editor")
+    QApplication.setApplicationDisplayName("PDF Viewer & Editor")
+    QApplication.setOrganizationName("pdfeditor")
+
     app = QApplication(argv)
-    app.setApplicationName("PDF Viewer & Editor")
-    app.setApplicationDisplayName("PDF Viewer & Editor")
-    app.setOrganizationName("pdfeditor")
-    # Associate the window with the installed launcher so the taskbar shows the
-    # app's name and icon (not "python3"). Must match the .desktop file's
-    # basename (pdf-viewer-editor.desktop) and its StartupWMClass.
-    app.setDesktopFileName("pdf-viewer-editor")
     app.setWindowIcon(_app_icon())
     app.setStyleSheet(DARK_QSS)
 
