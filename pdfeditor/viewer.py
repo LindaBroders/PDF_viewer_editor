@@ -109,6 +109,18 @@ class PageView(QWidget):
     def has_selection(self) -> bool:
         return bool(self._sel_text)
 
+    def selection(self) -> tuple[int, list]:
+        """Return (page_index, [word rects in PDF coords]) for the selection."""
+        return self._sel_page, list(self._sel_rects)
+
+    def point_to_page(self, pos: QPoint):
+        """Map a widget point to (page_index, pdf_x, pdf_y), or None if off-page."""
+        page = self._hit_test(pos)
+        if page is None:
+            return None
+        x, y = self._to_pdf_on(page, pos)
+        return page["index"], x, y
+
     def copy_selection(self) -> bool:
         """Copy the selected text to the clipboard. Returns True if any."""
         if self._sel_text:

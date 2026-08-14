@@ -5,9 +5,9 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import (
-    QAction, QColor, QIcon, QImage, QKeySequence, QPainter, QPixmap,
+    QAction, QColor, QGuiApplication, QIcon, QImage, QKeySequence, QPainter, QPixmap,
 )
 from PySide6.QtWidgets import (
     QColorDialog,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QScrollArea,
     QToolBar,
@@ -63,6 +64,11 @@ class MainWindow(QMainWindow):
         # Track scrolling so the page counter and thumbnail highlight follow.
         self._scroll.verticalScrollBar().valueChanged.connect(self._view.notify_scrolled)
         self._view.page_changed.connect(self._on_visible_page_changed)
+        # Ctrl + mouse wheel = zoom (handled in eventFilter, anchored on cursor).
+        self._view.installEventFilter(self)
+        # Right-click context menu.
+        self._view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._view.customContextMenuRequested.connect(self._show_context_menu)
 
         self._thumbs = QListWidget()
         self._thumbs.setFixedWidth(180)
@@ -1084,6 +1090,110 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Copied selected text.", 2000)
         else:
             self.statusBar().showMessage("No text selected — drag with the Select Text tool.", 3000)
+
+    # -- Ctrl+wheel zoom ------------------------------------------------
+
+    def eventFilter(self, obj, event):  # noqa: N802 (Qt naming)
+        if obj is self._view and event.type() == QEvent.Wheel and self._doc:
+            if event.modifiers() & Qt.ControlModifier:
+                self._zoom_at_cursor(event)
+                return True
+        return super().eventFilter(obj, event)
+
+    def _zoom_at_cursor(self, event) -> None:
+        """Zoom keeping the document point under the cursor fixed."""
+        pos = event.position()
+        hbar = self._scroll.horizontalScrollBar()
+        vbar = self._scroll.verticalScrollBar()
+        old_w, old_h = max(1, self._view.width()), max(1, self._view.height())
+        screen_x = pos.x() - hbar.value()
+        screen_y = pos.y() - vbar.value()
+        fx, fy = pos.x() / old_w, pos.y() / old_h
+        factor = 1.15 if event.angleDelta().y() > 0 else (1 / 1.15)
+        self._view.set_zoom(self._view.zoom * factor)
+        hbar.setValue(int(fx * self._view.width() - screen_x))
+        vbar.setValue(int(fy * self._view.height() - screen_y))
+        self._on_visible_page_changed(self._view.current_page())
+
+    # -- right-click context menu ---------------------------------------
+
+    def _show_context_menu(self, pos) -> None:
+        if not self._doc:
+            return
+        menu = QMenu(self)
+        hit = self._view.point_to_page(pos)
+
+        if self._view.has_selection():
+            menu.addAction("Copy", self._copy_text)
+            menu.addAction("Highlight Selection", self._highlight_selection)
+            menu.addAction("Redact Selection", self._redact_selection)
+            menu.addSeparator()
+
+        if hit is not None:
+            idx, x, y = hit
+            menu.addAction("Insert Text Here…", lambda: self._insert_text_at(idx, x, y))
+            menu.addAction("Sticky Note Here…", lambda: self._note_at(idx, x, y))
+            menu.addAction("Insert Signature / Initials…", self._insert_signature)
+            menu.addSeparator()
+
+        menu.addActions([self.act_undo, self.act_redo])
+        menu.addSeparator()
+        menu.addActions([self.act_zoom_in, self.act_zoom_out, self.act_fit_width])
+        menu.addSeparator()
+        menu.addActions([self.act_rotate_cw, self.act_rotate_ccw, self.act_delete_page])
+        menu.addSeparator()
+        menu.addAction("Copy Whole Page Text", self._copy_page_text)
+        menu.exec(self._view.mapToGlobal(pos))
+
+    def _highlight_selection(self) -> None:
+        page, rects = self._view.selection()
+        if not rects:
+            return
+        self._checkpoint()
+        for r in rects:
+            self._doc.add_highlight(page, r)
+        self._view.clear_selection()
+        self._view.refresh()
+        self._on_edited()
+
+    def _redact_selection(self) -> None:
+        page, rects = self._view.selection()
+        if not rects:
+            return
+        if QMessageBox.question(
+            self, "Redact Selection",
+            "Permanently remove the selected text? This cannot be undone after saving.",
+        ) != QMessageBox.Yes:
+            return
+        self._checkpoint()
+        for r in rects:
+            self._doc.redact(page, r)
+        self._view.clear_selection()
+        self._view.refresh()
+        self._rebuild_thumbnails()
+        self._on_edited()
+
+    def _insert_text_at(self, idx: int, x: float, y: float) -> None:
+        text, ok = QInputDialog.getMultiLineText(self, "Insert Text", "Text:")
+        if ok and text:
+            self._checkpoint()
+            self._doc.add_text(idx, (x, y + 11), text)
+            self._view.refresh()
+            self._on_edited()
+
+    def _note_at(self, idx: int, x: float, y: float) -> None:
+        text, ok = QInputDialog.getMultiLineText(self, "Sticky Note", "Note:")
+        if ok and text:
+            self._checkpoint()
+            self._doc.add_note(idx, (x, y), text)
+            self._view.refresh()
+            self._on_edited()
+
+    def _copy_page_text(self) -> None:
+        if not self._doc:
+            return
+        QGuiApplication.clipboard().setText(self._doc.get_text(self._view.page_index))
+        self.statusBar().showMessage("Copied page text.", 2000)
 
     # -- undo / redo ----------------------------------------------------
 
