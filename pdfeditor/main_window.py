@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QScrollArea,
     QToolBar,
+    QToolButton,
     QWidget,
 )
 
@@ -221,22 +222,28 @@ class MainWindow(QMainWindow):
         m_edit = mb.addMenu("&Tools")
         m_edit.addActions([self.act_copy, self.act_search, self.act_add_image, self.act_ink_color])
 
+    def _icon(self, name: str) -> QIcon:
+        """Load a bundled minimalist icon by name (SVG), or a theme fallback."""
+        path = os.path.join(
+            os.path.dirname(__file__), "..", "packaging", "icons", "toolbar", name + ".svg"
+        )
+        if os.path.exists(path):
+            return QIcon(path)
+        return QIcon.fromTheme(name)
+
     def _assign_icons(self) -> None:
-        """Give toolbar actions theme icons and a hover tooltip."""
+        """Give toolbar actions our minimalist icons and a hover tooltip."""
         icons = {
-            self.act_open: "document-open", self.act_save: "document-save",
-            self.act_save_as: "document-save-as", self.act_print: "document-print",
-            self.act_undo: "edit-undo", self.act_redo: "edit-redo",
+            self.act_open: "open", self.act_save: "save", self.act_print: "print",
+            self.act_undo: "undo", self.act_redo: "redo",
             self.act_zoom_in: "zoom-in", self.act_zoom_out: "zoom-out",
-            self.act_fit_width: "zoom-fit-best", self.act_prev: "go-previous",
-            self.act_next: "go-next", self.act_rotate_cw: "object-rotate-right",
-            self.act_rotate_ccw: "object-rotate-left", self.act_delete_page: "edit-delete",
-            self.act_signature: "document-edit", self.act_search: "edit-find",
+            self.act_fit_width: "fit-width", self.act_prev: "prev", self.act_next: "next",
+            self.act_rotate_cw: "rotate-right", self.act_rotate_ccw: "rotate-left",
+            self.act_delete_page: "delete", self.act_signature: "signature",
+            self.act_search: "search",
         }
         for act, name in icons.items():
-            ic = QIcon.fromTheme(name)
-            if not ic.isNull():
-                act.setIcon(ic)
+            act.setIcon(self._icon(name))
             # Hover tooltip = the action's label (mnemonics/ellipsis stripped).
             act.setToolTip(act.text().replace("&", "").replace("…", ""))
 
@@ -244,12 +251,23 @@ class MainWindow(QMainWindow):
         self._assign_icons()
         tb = QToolBar("Main")
         tb.setMovable(False)
-        # Icons + hover tooltips where an icon theme exists (Fedora/GNOME); fall
-        # back to text-beside-icon on systems without one so buttons stay legible.
-        has_icons = not QIcon.fromTheme("edit-undo").isNull()
-        tb.setToolButtonStyle(Qt.ToolButtonIconOnly if has_icons else Qt.ToolButtonTextBesideIcon)
+        # We ship our own icons, so always use icon-only with hover tooltips.
+        icon_style = Qt.ToolButtonIconOnly
+        tb.setToolButtonStyle(icon_style)
         self.addToolBar(tb)
-        tb.addActions([self.act_open, self.act_save, self.act_save_as, self.act_print])
+
+        tb.addAction(self.act_open)
+        # Save is a split button: click = Save, dropdown arrow = Save As.
+        save_btn = QToolButton()
+        save_btn.setDefaultAction(self.act_save)
+        save_btn.setToolButtonStyle(icon_style)
+        save_btn.setPopupMode(QToolButton.MenuButtonPopup)
+        save_menu = QMenu(save_btn)
+        save_menu.addAction(self.act_save_as)
+        save_btn.setMenu(save_menu)
+        self._save_btn = save_btn
+        tb.addWidget(save_btn)
+        tb.addAction(self.act_print)
         tb.addSeparator()
         tb.addActions([self.act_undo, self.act_redo])
         tb.addSeparator()

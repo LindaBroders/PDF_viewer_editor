@@ -76,6 +76,15 @@ QToolButton {{
 QToolButton:hover {{ background-color: {SURFACE_ALT}; }}
 QToolButton:pressed {{ background-color: {ACCENT}; color: {ACCENT_TEXT}; }}
 QToolButton:disabled {{ color: {MUTED}; }}
+/* Split-button (Save ▾) dropdown section */
+QToolButton::menu-button {{
+    border: none;
+    background: transparent;
+    width: 16px;
+    border-top-right-radius: 8px;
+    border-bottom-right-radius: 8px;
+}}
+QToolButton::menu-arrow {{ image: url("{_CHEVRON}"); width: 9px; height: 9px; }}
 
 /* Push buttons (dialogs) */
 QPushButton {{
