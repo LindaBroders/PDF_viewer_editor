@@ -81,11 +81,29 @@ class MainWindow(QMainWindow):
         self._thumbs.customContextMenuRequested.connect(self._thumb_context_menu)
 
         central = QWidget()
-        from PySide6.QtWidgets import QHBoxLayout
+        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
+
+        # Left panel: a small collapse arrow above the thumbnail list.
+        self._left_panel = QWidget()
+        left = QVBoxLayout(self._left_panel)
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(0)
+        self._thumb_toggle = QToolButton()
+        self._thumb_toggle.setAutoRaise(True)
+        self._thumb_toggle.setIcon(self._icon("prev"))
+        self._thumb_toggle.setToolTip("Hide page thumbnails")
+        self._thumb_toggle.clicked.connect(self._toggle_thumbnails)
+        header = QWidget()
+        hbar = QHBoxLayout(header)
+        hbar.setContentsMargins(4, 4, 4, 4)
+        hbar.addStretch(1)
+        hbar.addWidget(self._thumb_toggle)
+        left.addWidget(header)
+        left.addWidget(self._thumbs, 1)
 
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._thumbs)
+        layout.addWidget(self._left_panel)
         layout.addWidget(self._scroll, 1)
         self.setCentralWidget(central)
 
@@ -116,6 +134,7 @@ class MainWindow(QMainWindow):
         self.act_zoom_in = QAction("Zoom &In", self, shortcut=QKeySequence.ZoomIn, triggered=lambda: self._zoom_by(1.25))
         self.act_zoom_out = QAction("Zoom &Out", self, shortcut=QKeySequence.ZoomOut, triggered=lambda: self._zoom_by(0.8))
         self.act_fit_width = QAction("&Fit Width", self, triggered=self._fit_width)
+        self.act_toggle_thumbs = QAction("Toggle &Thumbnails", self, shortcut="F9", triggered=self._toggle_thumbnails)
 
         self.act_prev = QAction("&Previous Page", self, shortcut="PgUp", triggered=lambda: self._go_page(self._view.page_index - 1))
         self.act_next = QAction("&Next Page", self, shortcut="PgDown", triggered=lambda: self._go_page(self._view.page_index + 1))
@@ -189,6 +208,8 @@ class MainWindow(QMainWindow):
 
         m_view = mb.addMenu("&View")
         m_view.addActions([self.act_zoom_in, self.act_zoom_out, self.act_fit_width])
+        m_view.addSeparator()
+        m_view.addAction(self.act_toggle_thumbs)
         m_view.addSeparator()
         m_view.addActions([self.act_prev, self.act_next, self.act_goto])
 
@@ -1168,6 +1189,15 @@ class MainWindow(QMainWindow):
 
     def _fit_width(self) -> None:
         self._view.fit_width(self._scroll.viewport().width())
+
+    def _toggle_thumbnails(self) -> None:
+        showing = self._thumbs.isVisible()
+        self._thumbs.setVisible(not showing)
+        # Arrow points the way it will move the panel next.
+        self._thumb_toggle.setIcon(self._icon("next" if showing else "prev"))
+        self._thumb_toggle.setToolTip(
+            "Show page thumbnails" if showing else "Hide page thumbnails"
+        )
 
     def _set_tool(self, tool: Tool) -> None:
         self._view.tool = tool
