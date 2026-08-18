@@ -81,29 +81,25 @@ class MainWindow(QMainWindow):
         self._thumbs.customContextMenuRequested.connect(self._thumb_context_menu)
 
         central = QWidget()
-        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
+        from PySide6.QtWidgets import QHBoxLayout, QSizePolicy
 
-        # Left panel: a small collapse arrow above the thumbnail list.
-        self._left_panel = QWidget()
-        left = QVBoxLayout(self._left_panel)
-        left.setContentsMargins(0, 0, 0, 0)
-        left.setSpacing(0)
-        self._thumb_toggle = QToolButton()
-        self._thumb_toggle.setAutoRaise(True)
-        self._thumb_toggle.setIcon(self._icon("prev"))
-        self._thumb_toggle.setToolTip("Hide page thumbnails")
-        self._thumb_toggle.clicked.connect(self._toggle_thumbnails)
-        header = QWidget()
-        hbar = QHBoxLayout(header)
-        hbar.setContentsMargins(4, 4, 4, 4)
-        hbar.addStretch(1)
-        hbar.addWidget(self._thumb_toggle)
-        left.addWidget(header)
-        left.addWidget(self._thumbs, 1)
+        # Left area: the thumbnail list plus a full-height grey rail on its
+        # right edge. Clicking anywhere on the rail collapses/expands the list.
+        self._thumb_rail = QToolButton()
+        self._thumb_rail.setObjectName("thumbRail")
+        self._thumb_rail.setAutoRaise(True)
+        self._thumb_rail.setIcon(self._icon("prev"))
+        self._thumb_rail.setToolTip("Hide page thumbnails")
+        self._thumb_rail.setCursor(Qt.PointingHandCursor)
+        self._thumb_rail.setFixedWidth(18)
+        self._thumb_rail.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self._thumb_rail.clicked.connect(self._toggle_thumbnails)
 
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._left_panel)
+        layout.setSpacing(0)
+        layout.addWidget(self._thumbs)
+        layout.addWidget(self._thumb_rail)
         layout.addWidget(self._scroll, 1)
         self.setCentralWidget(central)
 
@@ -1194,8 +1190,8 @@ class MainWindow(QMainWindow):
         showing = self._thumbs.isVisible()
         self._thumbs.setVisible(not showing)
         # Arrow points the way it will move the panel next.
-        self._thumb_toggle.setIcon(self._icon("next" if showing else "prev"))
-        self._thumb_toggle.setToolTip(
+        self._thumb_rail.setIcon(self._icon("next" if showing else "prev"))
+        self._thumb_rail.setToolTip(
             "Show page thumbnails" if showing else "Hide page thumbnails"
         )
 

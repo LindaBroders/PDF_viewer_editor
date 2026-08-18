@@ -86,6 +86,18 @@ QToolButton::menu-button {{
 }}
 QToolButton::menu-arrow {{ image: url("{_CHEVRON}"); width: 9px; height: 9px; }}
 
+/* Collapse rail: a full-height grey strip next to the thumbnails.
+   Clicking anywhere on it hides/shows the page-preview list. */
+QToolButton#thumbRail {{
+    background-color: {SURFACE_ALT};
+    border: none;
+    border-right: 1px solid {BORDER};
+    border-radius: 0;
+    padding: 0;
+}}
+QToolButton#thumbRail:hover {{ background-color: {ACCENT}; }}
+QToolButton#thumbRail:pressed {{ background-color: #4a86bd; }}
+
 /* Push buttons (dialogs) */
 QPushButton {{
     background-color: {SURFACE_ALT};
