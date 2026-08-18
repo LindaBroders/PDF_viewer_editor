@@ -36,6 +36,7 @@ class Tool(Enum):
 
     HAND = auto()        # pan / scroll, no edit
     SELECT = auto()      # drag to select text (copy with Ctrl+C)
+    EDIT_TEXT = auto()   # click a line of real text to edit its words
     TEXT = auto()        # click to place text
     NOTE = auto()        # click to place a sticky note
     HIGHLIGHT = auto()   # drag a rectangle to highlight
@@ -71,6 +72,8 @@ class PageView(QWidget):
     annotations_changed = Signal()
     # Emitted (page_index, xref) when an annotation is double-clicked to edit.
     annot_edit_requested = Signal(int, int)
+    # Emitted (page_index, pdf_x, pdf_y) to edit the real text line at a point.
+    edit_text_requested = Signal(int, float, float)
 
     GAP = 18  # pixels of grey between stacked pages
 
@@ -778,6 +781,10 @@ class PageView(QWidget):
             x, y = self._to_pdf_on(page, pos)
             self.place_requested.emit(page["index"], x, y)
             return
+        if self.tool == Tool.EDIT_TEXT:
+            x, y = self._to_pdf_on(page, pos)
+            self.edit_text_requested.emit(page["index"], x, y)
+            return
 
         self._drag_start = pos
         self._drag_now = pos
@@ -939,6 +946,9 @@ class PageView(QWidget):
             return
         if self.tool == Tool.HAND:
             self.setCursor(Qt.OpenHandCursor)
+            return
+        if self.tool == Tool.EDIT_TEXT:
+            self.setCursor(Qt.IBeamCursor if self._text_at(pos) else Qt.ArrowCursor)
             return
         if self.tool != Tool.SELECT:
             self.setCursor(Qt.CrossCursor)

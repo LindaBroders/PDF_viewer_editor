@@ -362,6 +362,79 @@ class PdfDocument:
     # save/close/reopen and can be read and edited by Adobe, Foxit, etc.
     # A companion Comments panel in the UI lists them.
 
+    # -- editing existing (real) text ----------------------------------
+
+    def get_text_line_at(self, index: int, x: float, y: float) -> Optional[dict]:
+        """Return the line of real text under a PDF point, with its style.
+
+        ``{page, text, bbox, size, color, flags, origin}`` or None if the
+        point isn't on selectable text.
+        """
+        page = self._page(index)
+        data = page.get_text("dict")
+        for block in data.get("blocks", []):
+            if block.get("type", 0) != 0:      # skip image blocks
+                continue
+            for line in block.get("lines", []):
+                x0, y0, x1, y1 = line["bbox"]
+                if x0 - 1 <= x <= x1 + 1 and y0 - 1 <= y <= y1 + 1:
+                    spans = line.get("spans", [])
+                    if not spans:
+                        continue
+                    text = "".join(s.get("text", "") for s in spans)
+                    s0 = spans[0]
+                    return {
+                        "page": index,
+                        "text": text,
+                        "bbox": [x0, y0, x1, y1],
+                        "size": s0.get("size", 11.0),
+                        "color": s0.get("color", 0),
+                        "flags": s0.get("flags", 0),
+                        "origin": list(s0.get("origin", (x0, y1))),
+                    }
+        return None
+
+    @staticmethod
+    def _base14_for(flags: int) -> str:
+        """Pick a base-14 font name honouring bold/italic/serif/mono flags."""
+        bold, italic = bool(flags & 16), bool(flags & 2)
+        if flags & 8:      # monospaced
+            return {(0, 0): "cour", (1, 0): "cobo",
+                    (0, 1): "coit", (1, 1): "cobi"}[(bold, italic)]
+        if flags & 4:      # serifed
+            return {(0, 0): "tiro", (1, 0): "tibo",
+                    (0, 1): "tiit", (1, 1): "tibi"}[(bold, italic)]
+        return {(0, 0): "helv", (1, 0): "hebo",
+                (0, 1): "heit", (1, 1): "hebi"}[(bold, italic)]
+
+    def replace_text_line(self, span: dict, new_text: str) -> None:
+        """Replace one line of real text: remove the original glyphs and
+        re-insert the edited text at the same spot, matching size/colour/style
+        as closely as the base-14 fonts allow."""
+        index = span["page"]
+        page = self._page(index)
+        rect = fitz.Rect(*span["bbox"])
+        page.add_redact_annot(rect, fill=False)   # no white box painted
+        try:
+            page.apply_redactions(
+                images=fitz.PDF_REDACT_IMAGE_NONE,
+                graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+            )
+        except Exception:  # pragma: no cover - older PyMuPDF
+            page.apply_redactions()
+        if new_text:
+            color = fitz.sRGB_to_pdf(int(span.get("color", 0)))
+            fontname = self._base14_for(int(span.get("flags", 0)))
+            size = float(span.get("size", 11.0))
+            # Shrink the size if the new text would overrun the original width.
+            if rect.width > 4:
+                length = fitz.get_text_length(new_text, fontname=fontname, fontsize=size)
+                if length > rect.width:
+                    size = max(4.0, size * rect.width / length)
+            page.insert_text(fitz.Point(*span["origin"]), new_text,
+                             fontsize=size, color=color, fontname=fontname)
+        self.dirty = True
+
     def add_freetext(
         self,
         index: int,

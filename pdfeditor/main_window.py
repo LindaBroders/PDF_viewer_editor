@@ -124,6 +124,7 @@ class DocumentTab(QWidget):
         self.view.objects_changed.connect(lambda: self.win._on_objects_changed())
         self.view.annotations_changed.connect(lambda: self.win._on_annotations_changed())
         self.view.annot_edit_requested.connect(lambda pg, xr: self.win._on_annot_edit_requested(pg, xr))
+        self.view.edit_text_requested.connect(lambda pg, x, y: self.win._on_edit_text_requested(pg, x, y))
         self.view.page_changed.connect(lambda i: self.win._on_visible_page_changed(i))
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(lambda pos: self.win._show_context_menu(pos))
@@ -586,6 +587,7 @@ class MainWindow(QMainWindow):
         for label, tool in [
             ("Select Text", Tool.SELECT),
             ("Hand (pan)", Tool.HAND),
+            ("Edit Text", Tool.EDIT_TEXT),
             ("Text", Tool.TEXT),
             ("Sticky Note", Tool.NOTE),
             ("Highlight", Tool.HIGHLIGHT),
@@ -890,6 +892,30 @@ class MainWindow(QMainWindow):
                 self._view.add_note_annotation(page, x, y, text)
         # Back to Select so the new item can be dragged/edited right away.
         self._tool_box.setCurrentIndex(self._tool_index(Tool.SELECT))
+
+    def _on_edit_text_requested(self, page: int, x: float, y: float) -> None:
+        """Edit the line of real (selectable) text the user clicked on."""
+        if not self._doc:
+            return
+        span = self._doc.get_text_line_at(page, x, y)
+        if span is None:
+            self.statusBar().showMessage(
+                "No editable text here — this looks like a scanned image.", 4000
+            )
+            return
+        new_text, ok = QInputDialog.getMultiLineText(
+            self, "Edit Text", "Text:", span["text"]
+        )
+        if not ok or new_text == span["text"]:
+            return
+        self._checkpoint()
+        self._doc.replace_text_line(span, new_text)
+        self._view.refresh_page(page)
+        self._on_edited()
+
+    def _edit_text_at(self, idx: int, x: float, y: float) -> None:
+        """Right-click 'Edit Text Here' entry."""
+        self._on_edit_text_requested(idx, x, y)
 
     def _on_rect_selected(self, page: int, x0: float, y0: float, x1: float, y1: float) -> None:
         """Handle tools that drag a rectangle and need extra input."""
@@ -1763,6 +1789,8 @@ class MainWindow(QMainWindow):
             self._view.setCursor(Qt.OpenHandCursor)
         elif tool == Tool.SELECT:
             self._view.setCursor(Qt.ArrowCursor)
+        elif tool == Tool.EDIT_TEXT:
+            self._view.setCursor(Qt.IBeamCursor)
         else:
             self._view.setCursor(Qt.CrossCursor)
 
@@ -1818,6 +1846,8 @@ class MainWindow(QMainWindow):
 
         if hit is not None:
             idx, x, y = hit
+            if self._doc.get_text_line_at(idx, x, y) is not None:
+                menu.addAction("Edit Text Here…", lambda: self._edit_text_at(idx, x, y))
             menu.addAction("Insert Text Here…", lambda: self._insert_text_at(idx, x, y))
             menu.addAction("Sticky Note Here…", lambda: self._note_at(idx, x, y))
             menu.addAction("Insert Signature / Initials…", self._insert_signature)
