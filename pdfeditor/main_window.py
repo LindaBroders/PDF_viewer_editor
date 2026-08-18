@@ -196,6 +196,16 @@ class DocumentTab(QWidget):
         outer.setSpacing(0)
         outer.addWidget(self.splitter)
 
+        # Start with both side panels collapsed to just their rails; the user
+        # expands them with the rails, the View menu, or F9 / F10.
+        self.thumbs.setVisible(False)
+        self.comments_panel.setVisible(False)
+        self.thumb_rail.setIcon(win._icon("next"))
+        self.thumb_rail.setToolTip("Show page thumbnails")
+        self.comments_rail.setIcon(win._icon("prev"))
+        self.comments_rail.setToolTip("Show comments")
+        self.splitter.setSizes([18, 1000, 18])
+
     def _build_comments_panel(self, win: "MainWindow") -> QWidget:
         panel = QWidget()
         panel.setObjectName("commentsPanel")
