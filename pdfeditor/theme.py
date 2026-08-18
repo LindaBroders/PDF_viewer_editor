@@ -98,6 +98,13 @@ QToolButton#thumbRail {{
 QToolButton#thumbRail:hover {{ background-color: {ACCENT}; }}
 QToolButton#thumbRail:pressed {{ background-color: #4a86bd; }}
 
+/* Splitter handles between the side panels and the page area */
+QSplitter#mainSplitter::handle {{
+    background-color: {BORDER};
+}}
+QSplitter#mainSplitter::handle:horizontal {{ width: 5px; }}
+QSplitter#mainSplitter::handle:hover {{ background-color: {ACCENT}; }}
+
 /* Comments panel (right side): live annotation list */
 QWidget#commentsPanel {{
     background-color: {SURFACE};

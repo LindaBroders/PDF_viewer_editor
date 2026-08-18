@@ -79,14 +79,14 @@ class MainWindow(QMainWindow):
         self._view.customContextMenuRequested.connect(self._show_context_menu)
 
         self._thumbs = QListWidget()
-        self._thumbs.setFixedWidth(180)
+        self._thumbs.setMinimumWidth(96)
         self._thumbs.setIconSize(QPixmap(140, 180).size())
         self._thumbs.currentRowChanged.connect(self._on_thumb_selected)
         self._thumbs.setContextMenuPolicy(Qt.CustomContextMenu)
         self._thumbs.customContextMenuRequested.connect(self._thumb_context_menu)
 
         central = QWidget()
-        from PySide6.QtWidgets import QHBoxLayout, QSizePolicy
+        from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QSplitter
 
         # Left area: the thumbnail list plus a full-height grey rail on its
         # right edge. Clicking anywhere on the rail collapses/expands the list.
@@ -114,14 +114,39 @@ class MainWindow(QMainWindow):
         self._comments_rail.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self._comments_rail.clicked.connect(self._toggle_comments)
 
+        # Left container: thumbnails + collapse rail on its right edge.
+        self._left_wrap = QWidget()
+        lw = QHBoxLayout(self._left_wrap)
+        lw.setContentsMargins(0, 0, 0, 0)
+        lw.setSpacing(0)
+        lw.addWidget(self._thumbs, 1)
+        lw.addWidget(self._thumb_rail)
+
+        # Right container: collapse rail on its left edge + comments panel.
+        self._right_wrap = QWidget()
+        rw = QHBoxLayout(self._right_wrap)
+        rw.setContentsMargins(0, 0, 0, 0)
+        rw.setSpacing(0)
+        rw.addWidget(self._comments_rail)
+        rw.addWidget(self._comments_panel, 1)
+
+        # A splitter lets the user drag the dividers to resize both panels.
+        self._splitter = QSplitter(Qt.Horizontal)
+        self._splitter.setObjectName("mainSplitter")
+        self._splitter.setHandleWidth(5)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.addWidget(self._left_wrap)
+        self._splitter.addWidget(self._scroll)
+        self._splitter.addWidget(self._right_wrap)
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)   # the page area takes the slack
+        self._splitter.setStretchFactor(2, 0)
+        self._splitter.setSizes([190, 820, 260])
+
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._thumbs)
-        layout.addWidget(self._thumb_rail)
-        layout.addWidget(self._scroll, 1)
-        layout.addWidget(self._comments_rail)
-        layout.addWidget(self._comments_panel)
+        layout.addWidget(self._splitter)
         self.setCentralWidget(central)
 
         self._page_label = QLabel("No document")
@@ -154,6 +179,7 @@ class MainWindow(QMainWindow):
         self.act_toggle_thumbs = QAction("Toggle &Thumbnails", self, shortcut="F9", triggered=self._toggle_thumbnails)
         self.act_toggle_comments = QAction("Toggle &Comments", self, shortcut="F10", triggered=self._toggle_comments)
         self.act_set_author = QAction("Set Comment &Author…", self, triggered=self._set_comment_author)
+        self.act_rename_author = QAction("&Rename Author in PDF…", self, triggered=self._rename_existing_author)
 
         self.act_prev = QAction("&Previous Page", self, shortcut="PgUp", triggered=lambda: self._go_page(self._view.page_index - 1))
         self.act_next = QAction("&Next Page", self, shortcut="PgDown", triggered=lambda: self._go_page(self._view.page_index + 1))
@@ -226,6 +252,7 @@ class MainWindow(QMainWindow):
         m_editm.addAction(self.act_copy)
         m_editm.addSeparator()
         m_editm.addAction(self.act_set_author)
+        m_editm.addAction(self.act_rename_author)
 
         m_view = mb.addMenu("&View")
         m_view.addActions([self.act_zoom_in, self.act_zoom_out, self.act_fit_width])
@@ -1010,7 +1037,7 @@ class MainWindow(QMainWindow):
 
         panel = QWidget()
         panel.setObjectName("commentsPanel")
-        panel.setFixedWidth(250)
+        panel.setMinimumWidth(150)
         col = QVBoxLayout(panel)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(0)
@@ -1098,6 +1125,36 @@ class MainWindow(QMainWindow):
                 self._on_annotations_changed()
         self.statusBar().showMessage(
             f"Comment author set to “{name or '(none)'}”.", 3000
+        )
+
+    def _rename_existing_author(self) -> None:
+        """Rename an author already present on comments in this document."""
+        if not self._doc:
+            return
+        authors = self._doc.annotation_authors()
+        if not authors:
+            QMessageBox.information(
+                self, "Rename Author",
+                "There are no comments with an author name in this document yet.",
+            )
+            return
+        old, ok = QInputDialog.getItem(
+            self, "Rename Author", "Author to rename:", authors, 0, False
+        )
+        if not ok or not old:
+            return
+        new, ok = QInputDialog.getText(
+            self, "Rename Author", f"New name for “{old}”:", text=old
+        )
+        if not ok:
+            return
+        new = new.strip()
+        self._checkpoint()
+        changed = self._doc.rename_author(old, new)
+        self._view.refresh()
+        self._on_annotations_changed()
+        self.statusBar().showMessage(
+            f"Renamed author on {changed} comment(s).", 3000
         )
 
     def _on_annotations_changed(self) -> None:
@@ -1374,9 +1431,27 @@ class MainWindow(QMainWindow):
     def _fit_width(self) -> None:
         self._view.fit_width(self._scroll.viewport().width())
 
+    _RAIL_W = 18  # collapsed panel width (just the rail)
+
+    def _set_split_section(self, index: int, width: int) -> None:
+        """Resize one splitter section, letting the page area absorb the change."""
+        sizes = self._splitter.sizes()
+        if not (0 <= index < len(sizes)):
+            return
+        delta = width - sizes[index]
+        sizes[index] = width
+        sizes[1] = max(120, sizes[1] - delta)  # centre page area
+        self._splitter.setSizes(sizes)
+
     def _toggle_thumbnails(self) -> None:
         showing = self._thumbs.isVisible()
-        self._thumbs.setVisible(not showing)
+        if showing:
+            self._left_size = self._splitter.sizes()[0]
+            self._thumbs.setVisible(False)
+            self._set_split_section(0, self._RAIL_W)
+        else:
+            self._thumbs.setVisible(True)
+            self._set_split_section(0, getattr(self, "_left_size", 190))
         # Arrow points the way it will move the panel next.
         self._thumb_rail.setIcon(self._icon("next" if showing else "prev"))
         self._thumb_rail.setToolTip(
@@ -1385,7 +1460,13 @@ class MainWindow(QMainWindow):
 
     def _toggle_comments(self) -> None:
         showing = self._comments_panel.isVisible()
-        self._comments_panel.setVisible(not showing)
+        if showing:
+            self._right_size = self._splitter.sizes()[2]
+            self._comments_panel.setVisible(False)
+            self._set_split_section(2, self._RAIL_W)
+        else:
+            self._comments_panel.setVisible(True)
+            self._set_split_section(2, getattr(self, "_right_size", 260))
         # Arrow points the way the panel will move next.
         self._comments_rail.setIcon(self._icon("prev" if showing else "next"))
         self._comments_rail.setToolTip(

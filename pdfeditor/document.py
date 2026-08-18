@@ -496,6 +496,34 @@ class PdfDocument:
             self.dirty = True
         return count
 
+    def annotation_authors(self) -> list:
+        """Distinct author names present on annotations in the document."""
+        names: list = []
+        for i in range(self.page_count):
+            page = self._doc.load_page(i)
+            for annot in page.annots() or []:
+                author = (annot.info or {}).get("title", "")
+                if author and author not in names:
+                    names.append(author)
+        return names
+
+    def rename_author(self, old: str, new: str) -> int:
+        """Rename one existing author. Returns how many annotations changed."""
+        count = 0
+        for i in range(self.page_count):
+            page = self._doc.load_page(i)
+            for annot in page.annots() or []:
+                if (annot.info or {}).get("title", "") == old:
+                    try:
+                        annot.set_info(title=new)
+                        annot.update()
+                        count += 1
+                    except Exception:  # pragma: no cover
+                        pass
+        if count:
+            self.dirty = True
+        return count
+
     def redact(
         self, index: int, rect: tuple[float, float, float, float]
     ) -> None:
