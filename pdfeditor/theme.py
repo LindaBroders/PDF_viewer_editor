@@ -98,6 +98,37 @@ QToolButton#thumbRail {{
 QToolButton#thumbRail:hover {{ background-color: {ACCENT}; }}
 QToolButton#thumbRail:pressed {{ background-color: #4a86bd; }}
 
+/* Comments panel (right side): live annotation list */
+QWidget#commentsPanel {{
+    background-color: {SURFACE};
+    border-left: 1px solid {BORDER};
+}}
+QLabel#commentsTitle {{
+    color: {TEXT};
+    font-size: 14px;
+    font-weight: 600;
+}}
+QLabel#commentsEmpty {{ color: {MUTED}; padding: 20px; }}
+QListWidget#commentsList {{
+    background-color: {SURFACE};
+    border: none;
+    padding: 4px;
+    outline: 0;
+}}
+QListWidget#commentsList::item {{
+    background-color: {BG};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin: 4px 6px;
+    color: {TEXT};
+}}
+QListWidget#commentsList::item:selected {{
+    border-color: {ACCENT};
+    background-color: {SURFACE_ALT};
+    color: {TEXT};
+}}
+
 /* Push buttons (dialogs) */
 QPushButton {{
     background-color: {SURFACE_ALT};

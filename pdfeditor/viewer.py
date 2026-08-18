@@ -66,8 +66,11 @@ class PageView(QWidget):
     area_copied = Signal()
     # Emitted whenever the editable object layer changes (add/move/resize/delete).
     objects_changed = Signal()
-    # Emitted (object index) when a text/note object is double-clicked to edit.
-    object_edit_requested = Signal(int)
+    # Emitted whenever the live annotations change (add/move/edit/delete), so
+    # the Comments panel can refresh.
+    annotations_changed = Signal()
+    # Emitted (page_index, xref) when an annotation is double-clicked to edit.
+    annot_edit_requested = Signal(int, int)
 
     GAP = 18  # pixels of grey between stacked pages
 
@@ -119,6 +122,11 @@ class PageView(QWidget):
         self._obj_corner = -1
         self._obj_grab: Optional[QPoint] = None        # move offset (widget px)
 
+        # Live PDF annotations (comments/notes/highlights/free-text) are the
+        # real thing in the file — selected/moved/edited here, never flattened.
+        self._sel_annot: Optional[tuple[int, int]] = None   # (page_index, xref)
+        self._annot_drag: Optional[dict] = None             # active move gesture
+
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
 
@@ -129,6 +137,8 @@ class PageView(QWidget):
         self._last_current = -1
         self.clear_selection()
         self.clear_objects()
+        self._sel_annot = None
+        self._annot_drag = None
         self.rebuild()
         if doc:
             self.page_changed.emit(0)
@@ -212,26 +222,12 @@ class PageView(QWidget):
         self._cancel_placement()
 
     def overlay_objects(self) -> list:
-        """Objects for saving/flattening, tagged by kind so the document layer
-        can stamp images, write real text, or add note annotations."""
-        out = []
-        for o in self._objects:
-            kind = o.get("kind", "image")
-            rect = list(o["rect"])
-            if kind == "text":
-                # Font scales with the box: derive the effective point size from
-                # how much the object was resized relative to its natural height.
-                base_h = o.get("base_h") or (rect[3] - rect[1]) or 1
-                eff = o["size"] * ((rect[3] - rect[1]) / base_h)
-                out.append({"kind": "text", "page": o["page"], "rect": rect,
-                            "text": o["text"], "size": eff, "color": list(o["color"])})
-            elif kind == "note":
-                out.append({"kind": "note", "page": o["page"], "rect": rect,
-                            "text": o["text"]})
-            else:
-                out.append({"kind": "image", "page": o["page"], "rect": rect,
-                            "path": o["path"]})
-        return out
+        """Placed image/signature objects for stamping on save.
+
+        (Comments, notes, highlights and typed text are real PDF annotations
+        living in the document, not overlays — they are never flattened.)"""
+        return [{"kind": "image", "page": o["page"], "rect": list(o["rect"]),
+                 "path": o["path"]} for o in self._objects]
 
     def has_objects(self) -> bool:
         return bool(self._objects)
@@ -248,105 +244,95 @@ class PageView(QWidget):
             self.objects_changed.emit()
             self.update()
 
-    # -- text / note objects (editable, flattened to real PDF content) --
+    # -- live annotations (real PDF annotations; never flattened) --------
 
-    _TEXT_SS = 4  # supersample: canvas pixels rendered per PDF point
+    def add_freetext_annotation(self, page_index: int, x: float, y: float,
+                                text: str, size: float = 14.0) -> None:
+        """Insert typed text as an editable FreeText annotation."""
+        if self._doc is None:
+            return
+        w, h = self._freetext_extent(text, size)
+        self.edit_started.emit()  # snapshot for undo
+        xref = self._doc.add_freetext(page_index, (x, y, x + w, y + h), text, size)
+        self.refresh_page(page_index)
+        self._sel_annot = (page_index, xref)
+        self.annotations_changed.emit()
+        self.update()
 
-    def _render_text_pixmap(self, text: str, size: float,
-                            color: tuple) -> tuple[QPixmap, float, float]:
-        """Render text to a transparent pixmap. Returns (pixmap, w_pts, h_pts)."""
+    def add_note_annotation(self, page_index: int, x: float, y: float,
+                            text: str) -> None:
+        """Insert a sticky-note (Text) annotation."""
+        if self._doc is None:
+            return
+        self.edit_started.emit()
+        xref = self._doc.add_note(page_index, (x, y), text)
+        self.refresh_page(page_index)
+        self._sel_annot = (page_index, xref)
+        self.annotations_changed.emit()
+        self.update()
+
+    @staticmethod
+    def _freetext_extent(text: str, size: float) -> tuple[float, float]:
+        """Estimate a FreeText box (points) big enough for the text."""
         font = QFont("Helvetica")
-        font.setPixelSize(max(4, round(size * self._TEXT_SS)))
+        font.setPixelSize(max(4, round(size)))
         fm = QFontMetrics(font)
         lines = text.split("\n") or [""]
-        w = max((fm.horizontalAdvance(ln) for ln in lines), default=1) + 6
-        line_h = fm.height()
-        h = line_h * len(lines) + 6
-        pix = QPixmap(max(1, w), max(1, h))
-        pix.fill(Qt.transparent)
-        p = QPainter(pix)
-        p.setFont(font)
-        p.setPen(QColor.fromRgbF(*color))
-        y = fm.ascent() + 3
-        for ln in lines:
-            p.drawText(3, y, ln)
-            y += line_h
-        p.end()
-        return pix, w / self._TEXT_SS, h / self._TEXT_SS
+        w = max((fm.horizontalAdvance(ln) for ln in lines), default=10) + 8
+        h = fm.height() * len(lines) + 8
+        return float(w), float(h)
 
-    def _render_note_pixmap(self) -> tuple[QPixmap, float, float]:
-        """Render a small sticky-note icon. Returns (pixmap, w_pts, h_pts)."""
-        s = 22  # points
-        px = round(s * self._TEXT_SS)
-        pix = QPixmap(px, px)
-        pix.fill(Qt.transparent)
-        p = QPainter(pix)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setBrush(QColor(255, 214, 0))
-        p.setPen(QPen(QColor(180, 150, 0), self._TEXT_SS))
-        r = self._TEXT_SS
-        p.drawRoundedRect(r, r, px - 2 * r, px - 2 * r, 2 * r, 2 * r)
-        p.setPen(QPen(QColor(120, 100, 0), max(1, self._TEXT_SS // 2)))
-        for i in range(1, 4):
-            yy = round(px * 0.25 * i)
-            p.drawLine(round(px * 0.25), yy, round(px * 0.75), yy)
-        p.end()
-        return pix, float(s), float(s)
+    def selected_annotation(self) -> Optional[tuple[int, int]]:
+        return self._sel_annot
 
-    def add_text_object(self, page_index: int, x: float, y: float, text: str,
-                        size: float = 14.0, color: tuple = (0, 0, 0)) -> None:
-        """Insert editable text as a selectable overlay object."""
-        pix, bw, bh = self._render_text_pixmap(text, size, color)
-        self._objects.append({
-            "kind": "text", "page": page_index, "rect": [x, y, x + bw, y + bh],
-            "pixmap": pix, "text": text, "size": size, "color": list(color),
-            "base_w": bw, "base_h": bh,
-        })
-        self._sel_obj = len(self._objects) - 1
-        self.objects_changed.emit()
+    def select_annotation(self, page_index: int, xref: int) -> None:
+        """Select an annotation (from the Comments panel) and repaint."""
+        self._sel_annot = (page_index, xref)
+        self._sel_obj = -1
         self.update()
 
-    def add_note_object(self, page_index: int, x: float, y: float, text: str) -> None:
-        """Insert an editable sticky note as a selectable overlay object."""
-        pix, bw, bh = self._render_note_pixmap()
-        self._objects.append({
-            "kind": "note", "page": page_index, "rect": [x, y, x + bw, y + bh],
-            "pixmap": pix, "text": text, "base_w": bw, "base_h": bh,
-        })
-        self._sel_obj = len(self._objects) - 1
-        self.objects_changed.emit()
+    def clear_annot_selection(self) -> None:
+        self._sel_annot = None
         self.update()
 
-    def object_kind(self, i: int) -> Optional[str]:
-        if 0 <= i < len(self._objects):
-            return self._objects[i].get("kind", "image")
-        return None
-
-    def object_text(self, i: int) -> str:
-        if 0 <= i < len(self._objects):
-            return self._objects[i].get("text", "")
-        return ""
-
-    def update_text_object(self, i: int, new_text: str) -> None:
-        """Replace the text of a text/note object (empty text deletes it)."""
-        if not (0 <= i < len(self._objects)):
+    def delete_selected_annotation(self) -> None:
+        if self._sel_annot is None or self._doc is None:
             return
-        o = self._objects[i]
-        if not new_text:
-            del self._objects[i]
-            self._sel_obj = -1
-            self.objects_changed.emit()
-            self.update()
-            return
-        if o.get("kind") == "text":
-            pix, bw, bh = self._render_text_pixmap(new_text, o["size"], tuple(o["color"]))
-            x0, y0 = o["rect"][0], o["rect"][1]
-            o.update(text=new_text, pixmap=pix, base_w=bw, base_h=bh,
-                     rect=[x0, y0, x0 + bw, y0 + bh])
-        else:
-            o["text"] = new_text
-        self.objects_changed.emit()
+        page, xref = self._sel_annot
+        self.edit_started.emit()
+        self._doc.delete_annot(page, xref)
+        self._sel_annot = None
+        self.refresh_page(page)
+        self.annotations_changed.emit()
         self.update()
+
+    def _annot_hit(self, pos: QPoint) -> Optional[tuple[int, int]]:
+        """(page_index, xref) of the annotation under a widget point, or None."""
+        if self._doc is None:
+            return None
+        page = self._hit_test(pos)
+        if page is None:
+            return None
+        x, y = self._to_pdf_on(page, pos)
+        xref = self._doc.annot_at(page["index"], x, y)
+        return (page["index"], xref) if xref is not None else None
+
+    def _annot_widget_rect(self, page_index: int, xref: int,
+                           offset: Optional[QPoint] = None) -> Optional[QRect]:
+        pg = self._page_layout(page_index)
+        if pg is None or self._doc is None:
+            return None
+        r = self._doc.annot_rect(page_index, xref)
+        if r is None:
+            return None
+        dx = offset.x() if offset else 0
+        dy = offset.y() if offset else 0
+        return QRect(
+            round(pg["x"] + r[0] * self._zoom) + dx,
+            round(pg["y"] + r[1] * self._zoom) + dy,
+            round((r[2] - r[0]) * self._zoom),
+            round((r[3] - r[1]) * self._zoom),
+        )
 
     def _object_widget_rect(self, o: dict) -> Optional[QRect]:
         pg = self._page_layout(o["page"])
@@ -615,6 +601,15 @@ class PageView(QWidget):
             self._pages[idx]["pixmap"] = self._render(idx)
             self.update()
 
+    def refresh_page(self, index: int) -> None:
+        """Re-render one page (used after an annotation add/move/edit/delete)."""
+        if 0 <= index < len(self._pages):
+            self._layout_cache.pop(index, None)
+            self._pages[index]["pixmap"] = self._render(index)
+            self.update()
+        else:
+            self.rebuild()
+
     def _render(self, index: int) -> QPixmap:
         rp = self._doc.render_page(index, self._zoom)
         image = QImage(rp.samples, rp.width, rp.height, rp.stride, QImage.Format_RGBA8888)
@@ -690,6 +685,15 @@ class PageView(QWidget):
                 for h in self._obj_handles(wr):
                     painter.fillRect(h, QColor(0, 120, 215))
 
+        # Selected annotation: dashed outline (offset while being dragged).
+        if self._sel_annot is not None:
+            offset = self._annot_drag["delta"] if self._annot_drag else None
+            wr = self._annot_widget_rect(self._sel_annot[0], self._sel_annot[1], offset)
+            if wr is not None:
+                painter.setPen(QPen(QColor(0, 120, 215), 1, Qt.DashLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(wr.adjusted(-2, -2, 2, 2))
+
         # New image riding the cursor (before it is dropped).
         if self._placing() and self._place_rect is not None:
             painter.setOpacity(0.65)
@@ -728,7 +732,24 @@ class PageView(QWidget):
             self._sel_obj = -1
             self.update()
 
-        # 3) Hand tool: drag anywhere to pan the page (works over grey too).
+        # 3) Live annotation interaction (select + drag to move) in the two
+        #    pointer tools. Annotations are real PDF objects, so this edits the
+        #    document directly; the move commits on release.
+        if self.tool in (Tool.SELECT, Tool.HAND):
+            ann = self._annot_hit(pos)
+            if ann is not None:
+                self._sel_annot = ann
+                self._annot_drag = {"page": ann[0], "xref": ann[1],
+                                    "start": pos, "delta": QPoint(0, 0), "moved": False}
+                self.annotations_changed.emit()
+                self.update()
+                return
+            if self._sel_annot is not None:  # clicked away -> deselect
+                self._sel_annot = None
+                self.annotations_changed.emit()
+                self.update()
+
+        # 4) Hand tool: drag anywhere to pan the page (works over grey too).
         if self.tool == Tool.HAND:
             area = self._scroll_area()
             if area is not None:
@@ -769,13 +790,12 @@ class PageView(QWidget):
             self._drop_placement(event.position().toPoint())
             return
         pos = event.position().toPoint()
-        # Double-clicking a text/note object opens it for editing (any tool).
-        hit = self._hit_object(pos)
-        if hit >= 0:
-            self._sel_obj = hit
+        # Double-clicking an annotation opens its text/comment for editing.
+        ann = self._annot_hit(pos)
+        if ann is not None:
+            self._sel_annot = ann
             self.update()
-            if self._objects[hit].get("kind") in ("text", "note"):
-                self.object_edit_requested.emit(hit)
+            self.annot_edit_requested.emit(ann[0], ann[1])
             return
         if not self._doc or event.button() != Qt.LeftButton or self.tool != Tool.SELECT:
             super().mouseDoubleClickEvent(event)
@@ -810,6 +830,12 @@ class PageView(QWidget):
             self._resize_object(self._objects[self._sel_obj], pos)
             self.update()
             return
+        if self._annot_drag is not None:
+            self._annot_drag["delta"] = pos - self._annot_drag["start"]
+            if not self._annot_drag["delta"].isNull():
+                self._annot_drag["moved"] = True
+            self.update()
+            return
         if self._drag_start is not None:
             self._drag_now = pos
             if self.tool == Tool.INK:
@@ -825,6 +851,22 @@ class PageView(QWidget):
         if self._pan is not None:
             self._pan = None
             self.setCursor(Qt.OpenHandCursor if self.tool == Tool.HAND else Qt.ArrowCursor)
+            return
+        if self._annot_drag is not None:
+            drag = self._annot_drag
+            self._annot_drag = None
+            if drag["moved"] and self._doc is not None:
+                page, xref = drag["page"], drag["xref"]
+                r = self._doc.annot_rect(page, xref)
+                if r is not None:
+                    dx = drag["delta"].x() / self._zoom
+                    dy = drag["delta"].y() / self._zoom
+                    self.edit_started.emit()  # snapshot for undo
+                    self._doc.move_annot(page, xref,
+                                         (r[0] + dx, r[1] + dy, r[2] + dx, r[3] + dy))
+                    self.refresh_page(page)
+                    self.annotations_changed.emit()
+            self.update()
             return
         if self._obj_mode is not None:
             self._obj_mode = None
@@ -892,6 +934,9 @@ class PageView(QWidget):
         if self._hit_object(pos) >= 0:
             self.setCursor(Qt.SizeAllCursor)          # move a placed object
             return
+        if self.tool in (Tool.SELECT, Tool.HAND) and self._annot_hit(pos) is not None:
+            self.setCursor(Qt.SizeAllCursor)          # move an annotation
+            return
         if self.tool == Tool.HAND:
             self.setCursor(Qt.OpenHandCursor)
             return
@@ -910,8 +955,16 @@ class PageView(QWidget):
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and 0 <= self._sel_obj < len(self._objects):
             self.delete_selected_object()
             return
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self._sel_annot is not None:
+            self.delete_selected_annotation()
+            return
         if event.key() == Qt.Key_Escape and self._sel_obj != -1:
             self._sel_obj = -1
+            self.update()
+            return
+        if event.key() == Qt.Key_Escape and self._sel_annot is not None:
+            self._sel_annot = None
+            self.annotations_changed.emit()
             self.update()
             return
         if event.matches(QKeySequence.Copy) and self.copy_selection():

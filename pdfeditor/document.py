@@ -275,11 +275,16 @@ class PdfDocument:
         return path
 
     def add_highlight(
-        self, index: int, rect: tuple[float, float, float, float]
-    ) -> None:
+        self, index: int, rect: tuple[float, float, float, float],
+        content: str = "",
+    ) -> int:
         page = self._page(index)
-        page.add_highlight_annot(fitz.Rect(*rect))
+        annot = page.add_highlight_annot(fitz.Rect(*rect))
+        if content:
+            annot.set_info(content=content)
+        annot.update()
         self.dirty = True
+        return annot.xref
 
     def add_underline(
         self, index: int, rect: tuple[float, float, float, float]
@@ -328,11 +333,128 @@ class PdfDocument:
 
     def add_note(
         self, index: int, point: tuple[float, float], text: str
-    ) -> None:
-        """Add a sticky-note (text) annotation."""
+    ) -> int:
+        """Add a sticky-note (Text) annotation. Returns its xref."""
         page = self._page(index)
-        page.add_text_annot(fitz.Point(*point), text)
+        annot = page.add_text_annot(fitz.Point(*point), text)
         self.dirty = True
+        return annot.xref
+
+    # -- live, editable annotations (standard PDF, no flattening) -------
+    #
+    # These stay as real PDF annotations in the file, so they survive
+    # save/close/reopen and can be read and edited by Adobe, Foxit, etc.
+    # A companion Comments panel in the UI lists them.
+
+    def add_freetext(
+        self,
+        index: int,
+        rect: tuple[float, float, float, float],
+        text: str,
+        size: float = 14.0,
+        color: tuple[float, float, float] = (0, 0, 0),
+    ) -> int:
+        """Add an editable FreeText annotation (visible typed text)."""
+        page = self._page(index)
+        annot = page.add_freetext_annot(
+            fitz.Rect(*rect), text, fontsize=size, text_color=color
+        )
+        annot.update()
+        self.dirty = True
+        return annot.xref
+
+    @staticmethod
+    def _annot_kind(annot) -> str:
+        """A short, human label for an annotation's type."""
+        try:
+            return annot.type[1]
+        except Exception:  # pragma: no cover - defensive
+            return "Annotation"
+
+    def _find_annot(self, page, xref: int):
+        for annot in page.annots() or []:
+            if annot.xref == xref:
+                return annot
+        return None
+
+    def list_annotations(self) -> list:
+        """Every annotation in the document, for the Comments panel.
+
+        Each entry: ``{page, xref, kind, content, rect, author}``.
+        """
+        out: list = []
+        for i in range(self.page_count):
+            page = self._doc.load_page(i)
+            for annot in page.annots() or []:
+                info = annot.info or {}
+                r = annot.rect
+                out.append({
+                    "page": i,
+                    "xref": annot.xref,
+                    "kind": self._annot_kind(annot),
+                    "content": info.get("content", ""),
+                    "rect": [r.x0, r.y0, r.x1, r.y1],
+                    "author": info.get("title", ""),
+                })
+        return out
+
+    def annot_at(self, index: int, x: float, y: float) -> Optional[int]:
+        """xref of the top-most annotation under a PDF point, or None."""
+        page = self._page(index)
+        pt = fitz.Point(x, y)
+        hit = None
+        for annot in page.annots() or []:
+            if annot.rect.contains(pt):
+                hit = annot.xref  # later annots paint on top
+        return hit
+
+    def annot_rect(self, index: int, xref: int) -> Optional[list]:
+        page = self._page(index)
+        annot = self._find_annot(page, xref)
+        if annot is None:
+            return None
+        r = annot.rect
+        return [r.x0, r.y0, r.x1, r.y1]
+
+    def move_annot(self, index: int, xref: int,
+                   rect: tuple[float, float, float, float]) -> None:
+        """Reposition/resize an annotation to a new rectangle."""
+        page = self._page(index)
+        annot = self._find_annot(page, xref)
+        if annot is None:
+            return
+        annot.set_rect(fitz.Rect(*rect))
+        try:
+            annot.update()
+        except Exception:  # pragma: no cover - some types self-update
+            pass
+        self.dirty = True
+
+    def get_annot_text(self, index: int, xref: int) -> str:
+        page = self._page(index)
+        annot = self._find_annot(page, xref)
+        return (annot.info or {}).get("content", "") if annot else ""
+
+    def set_annot_text(self, index: int, xref: int, text: str) -> None:
+        """Change an annotation's text/comment (works for FreeText, Text,
+        Highlight and friends)."""
+        page = self._page(index)
+        annot = self._find_annot(page, xref)
+        if annot is None:
+            return
+        annot.set_info(content=text)
+        try:
+            annot.update()
+        except Exception:  # pragma: no cover
+            pass
+        self.dirty = True
+
+    def delete_annot(self, index: int, xref: int) -> None:
+        page = self._page(index)
+        annot = self._find_annot(page, xref)
+        if annot is not None:
+            page.delete_annot(annot)
+            self.dirty = True
 
     def redact(
         self, index: int, rect: tuple[float, float, float, float]

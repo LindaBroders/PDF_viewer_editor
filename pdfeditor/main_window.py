@@ -59,7 +59,8 @@ class MainWindow(QMainWindow):
         self._view.edit_started.connect(self._checkpoint)
         self._view.area_copied.connect(self._on_area_copied)
         self._view.objects_changed.connect(self._on_objects_changed)
-        self._view.object_edit_requested.connect(self._on_object_edit_requested)
+        self._view.annotations_changed.connect(self._on_annotations_changed)
+        self._view.annot_edit_requested.connect(self._on_annot_edit_requested)
 
         self._scroll = QScrollArea()
         self._scroll.setWidget(self._view)
@@ -96,12 +97,15 @@ class MainWindow(QMainWindow):
         self._thumb_rail.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self._thumb_rail.clicked.connect(self._toggle_thumbnails)
 
+        self._comments_panel = self._build_comments_panel()
+
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._thumbs)
         layout.addWidget(self._thumb_rail)
         layout.addWidget(self._scroll, 1)
+        layout.addWidget(self._comments_panel)
         self.setCentralWidget(central)
 
         self._page_label = QLabel("No document")
@@ -132,6 +136,7 @@ class MainWindow(QMainWindow):
         self.act_zoom_out = QAction("Zoom &Out", self, shortcut=QKeySequence.ZoomOut, triggered=lambda: self._zoom_by(0.8))
         self.act_fit_width = QAction("&Fit Width", self, triggered=self._fit_width)
         self.act_toggle_thumbs = QAction("Toggle &Thumbnails", self, shortcut="F9", triggered=self._toggle_thumbnails)
+        self.act_toggle_comments = QAction("Toggle &Comments", self, shortcut="F10", triggered=self._toggle_comments)
 
         self.act_prev = QAction("&Previous Page", self, shortcut="PgUp", triggered=lambda: self._go_page(self._view.page_index - 1))
         self.act_next = QAction("&Next Page", self, shortcut="PgDown", triggered=lambda: self._go_page(self._view.page_index + 1))
@@ -207,6 +212,7 @@ class MainWindow(QMainWindow):
         m_view.addActions([self.act_zoom_in, self.act_zoom_out, self.act_fit_width])
         m_view.addSeparator()
         m_view.addAction(self.act_toggle_thumbs)
+        m_view.addAction(self.act_toggle_comments)
         m_view.addSeparator()
         m_view.addActions([self.act_prev, self.act_next, self.act_goto])
 
@@ -395,6 +401,7 @@ class MainWindow(QMainWindow):
         self._view.set_document(doc)
         self._view.fit_width(self._scroll.viewport().width())
         self._rebuild_thumbnails()
+        self._rebuild_comments()
         self._update_enabled()
         self._update_undo_actions()
         self._update_title()
@@ -506,11 +513,11 @@ class MainWindow(QMainWindow):
         if self._view.tool == Tool.TEXT:
             text, ok = QInputDialog.getMultiLineText(self, "Insert Text", "Text:")
             if ok and text:
-                self._view.add_text_object(page, x, y, text)
+                self._view.add_freetext_annotation(page, x, y, text)
         elif self._view.tool == Tool.NOTE:
             text, ok = QInputDialog.getMultiLineText(self, "Sticky Note", "Note:")
             if ok and text:
-                self._view.add_note_object(page, x, y, text)
+                self._view.add_note_annotation(page, x, y, text)
         # Back to Select so the new item can be dragged/edited right away.
         self._tool_box.setCurrentIndex(self._tool_index(Tool.SELECT))
 
@@ -975,6 +982,117 @@ class MainWindow(QMainWindow):
             self._doc.dirty = True
         self._update_title()
 
+    # -- Comments panel (live annotations) ------------------------------
+
+    def _build_comments_panel(self) -> QWidget:
+        """The Adobe-style list of comments/notes/highlights on the right."""
+        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
+
+        panel = QWidget()
+        panel.setObjectName("commentsPanel")
+        panel.setFixedWidth(250)
+        col = QVBoxLayout(panel)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+
+        header = QWidget()
+        hb = QHBoxLayout(header)
+        hb.setContentsMargins(10, 8, 8, 8)
+        title = QLabel("Comments")
+        title.setObjectName("commentsTitle")
+        hb.addWidget(title)
+        hb.addStretch(1)
+        col.addWidget(header)
+
+        self._comments = QListWidget()
+        self._comments.setObjectName("commentsList")
+        self._comments.setWordWrap(True)
+        self._comments.itemClicked.connect(self._on_comment_clicked)
+        self._comments.itemDoubleClicked.connect(self._on_comment_double_clicked)
+        self._comments.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._comments.customContextMenuRequested.connect(self._comment_context_menu)
+        col.addWidget(self._comments, 1)
+
+        self._comments_empty = QLabel(
+            "No comments yet.\nUse the Note, Text or\nHighlight tools to add some."
+        )
+        self._comments_empty.setObjectName("commentsEmpty")
+        self._comments_empty.setAlignment(Qt.AlignCenter)
+        self._comments_empty.setWordWrap(True)
+        col.addWidget(self._comments_empty)
+        col.setStretchFactor(self._comments, 1)
+        return panel
+
+    # Which annotation kinds show up in the Comments list.
+    _COMMENT_KINDS = {
+        "Text": "Note", "FreeText": "Text", "Highlight": "Highlight",
+        "Underline": "Underline", "StrikeOut": "Strikeout", "Squiggly": "Squiggly",
+        "Ink": "Drawing", "Square": "Rectangle", "Circle": "Oval",
+        "Line": "Line", "Polygon": "Polygon", "PolyLine": "Polyline",
+        "Stamp": "Stamp",
+    }
+
+    def _on_annotations_changed(self) -> None:
+        """An annotation was added, moved, edited or deleted — refresh panel."""
+        if self._doc:
+            self._doc.dirty = True
+        self._update_title()
+        self._rebuild_comments()
+
+    def _rebuild_comments(self) -> None:
+        self._comments.clear()
+        annots = self._doc.list_annotations() if self._doc else []
+        shown = [a for a in annots if a["kind"] in self._COMMENT_KINDS]
+        self._comments_empty.setVisible(not shown)
+        self._comments.setVisible(bool(shown))
+        sel = self._view.selected_annotation()
+        for a in shown:
+            label = self._COMMENT_KINDS.get(a["kind"], a["kind"])
+            body = (a["content"] or "").strip() or "(no text)"
+            item = QListWidgetItem(f"p.{a['page'] + 1}  ·  {label}\n{body}")
+            item.setData(Qt.UserRole, (a["page"], a["xref"]))
+            self._comments.addItem(item)
+            if sel is not None and sel == (a["page"], a["xref"]):
+                self._comments.setCurrentItem(item)
+
+    def _on_comment_clicked(self, item: QListWidgetItem) -> None:
+        page, xref = item.data(Qt.UserRole)
+        self._view.select_annotation(page, xref)
+        self._scroll_to_annotation(page, xref)
+
+    def _on_comment_double_clicked(self, item: QListWidgetItem) -> None:
+        page, xref = item.data(Qt.UserRole)
+        self._on_annot_edit_requested(page, xref)
+
+    def _comment_context_menu(self, pos) -> None:
+        item = self._comments.itemAt(pos)
+        if item is None:
+            return
+        page, xref = item.data(Qt.UserRole)
+        menu = QMenu(self)
+        menu.addAction("Edit…", lambda: self._on_annot_edit_requested(page, xref))
+        menu.addAction("Go to", lambda: self._scroll_to_annotation(page, xref))
+        menu.addSeparator()
+        menu.addAction("Delete", lambda: self._delete_annotation(page, xref))
+        menu.exec(self._comments.mapToGlobal(pos))
+
+    def _delete_annotation(self, page: int, xref: int) -> None:
+        if not self._doc:
+            return
+        self._checkpoint()
+        self._doc.delete_annot(page, xref)
+        self._view.clear_annot_selection()
+        self._view.refresh_page(page)
+        self._on_annotations_changed()
+
+    def _scroll_to_annotation(self, page: int, xref: int) -> None:
+        rect = self._doc.annot_rect(page, xref) if self._doc else None
+        self._scroll.verticalScrollBar().setValue(
+            max(0, self._view.page_top(page)
+                + (int(rect[1] * self._view.zoom) - 60 if rect else 0))
+        )
+        self._view.setFocus()
+
     def _prepare_new_signature(self) -> Optional[str]:
         """Upload an image, optionally remove its background, and save it."""
         src, _ = QFileDialog.getOpenFileName(
@@ -1194,6 +1312,9 @@ class MainWindow(QMainWindow):
             "Show page thumbnails" if showing else "Hide page thumbnails"
         )
 
+    def _toggle_comments(self) -> None:
+        self._comments_panel.setVisible(not self._comments_panel.isVisible())
+
     def _set_tool(self, tool: Tool) -> None:
         self._view.tool = tool
         # Base cursor; in Select mode hover refines it to I-beam over text,
@@ -1306,25 +1427,25 @@ class MainWindow(QMainWindow):
     def _insert_text_at(self, idx: int, x: float, y: float) -> None:
         text, ok = QInputDialog.getMultiLineText(self, "Insert Text", "Text:")
         if ok and text:
-            self._view.add_text_object(idx, x, y, text)
+            self._view.add_freetext_annotation(idx, x, y, text)
 
     def _note_at(self, idx: int, x: float, y: float) -> None:
         text, ok = QInputDialog.getMultiLineText(self, "Sticky Note", "Note:")
         if ok and text:
-            self._view.add_note_object(idx, x, y, text)
+            self._view.add_note_annotation(idx, x, y, text)
 
-    def _on_object_edit_requested(self, i: int) -> None:
-        """Double-clicked a placed text/note object — edit its content."""
-        kind = self._view.object_kind(i)
-        current = self._view.object_text(i)
-        if kind == "text":
-            text, ok = QInputDialog.getMultiLineText(self, "Edit Text", "Text:", current)
-        elif kind == "note":
-            text, ok = QInputDialog.getMultiLineText(self, "Edit Note", "Note:", current)
-        else:
+    def _on_annot_edit_requested(self, page: int, xref: int) -> None:
+        """Double-clicked an annotation — edit its text/comment."""
+        if not self._doc:
             return
-        if ok:
-            self._view.update_text_object(i, text)
+        current = self._doc.get_annot_text(page, xref)
+        text, ok = QInputDialog.getMultiLineText(self, "Edit Comment", "Text:", current)
+        if not ok:
+            return
+        self._checkpoint()
+        self._doc.set_annot_text(page, xref, text)
+        self._view.refresh_page(page)
+        self._on_annotations_changed()
 
     def _copy_page_text(self) -> None:
         if not self._doc:
@@ -1514,8 +1635,10 @@ class MainWindow(QMainWindow):
     def _restore(self, data: bytes) -> None:
         current = self._view.page_index
         self._doc.restore_bytes(data)
+        self._view.clear_annot_selection()
         self._view.refresh()
         self._rebuild_thumbnails()
+        self._rebuild_comments()
         self._go_page(min(current, self._doc.page_count - 1))
         self._update_title()
         self._update_page_label()
@@ -1532,6 +1655,7 @@ class MainWindow(QMainWindow):
     def _on_edited(self) -> None:
         self._update_title()
         self._refresh_current_thumbnail()
+        self._rebuild_comments()  # highlights/markup are annotations too
 
     # -- thumbnails -----------------------------------------------------
 
