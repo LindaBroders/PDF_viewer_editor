@@ -40,6 +40,8 @@ class PdfDocument:
         self._doc = doc
         self.path = path
         self.dirty = False
+        # Author name stamped on new annotations (the PDF "title"/T field).
+        self.author = ""
 
     # -- construction ---------------------------------------------------
 
@@ -274,6 +276,16 @@ class PdfDocument:
         self.dirty = False
         return path
 
+    def _apply_author(self, annot) -> None:
+        """Stamp the current author name onto an annotation (T/title field)."""
+        if not self.author:
+            return
+        try:
+            annot.set_info(title=self.author)
+            annot.update()
+        except Exception:  # pragma: no cover - some types self-update
+            pass
+
     def add_highlight(
         self, index: int, rect: tuple[float, float, float, float],
         content: str = "",
@@ -283,6 +295,7 @@ class PdfDocument:
         if content:
             annot.set_info(content=content)
         annot.update()
+        self._apply_author(annot)
         self.dirty = True
         return annot.xref
 
@@ -290,14 +303,14 @@ class PdfDocument:
         self, index: int, rect: tuple[float, float, float, float]
     ) -> None:
         page = self._page(index)
-        page.add_underline_annot(fitz.Rect(*rect))
+        self._apply_author(page.add_underline_annot(fitz.Rect(*rect)))
         self.dirty = True
 
     def add_strikeout(
         self, index: int, rect: tuple[float, float, float, float]
     ) -> None:
         page = self._page(index)
-        page.add_strikeout_annot(fitz.Rect(*rect))
+        self._apply_author(page.add_strikeout_annot(fitz.Rect(*rect)))
         self.dirty = True
 
     def add_ink(
@@ -315,6 +328,7 @@ class PdfDocument:
         annot.set_colors(stroke=color)
         annot.set_border(width=width)
         annot.update()
+        self._apply_author(annot)
         self.dirty = True
 
     def add_rect_annot(
@@ -329,6 +343,7 @@ class PdfDocument:
         annot.set_colors(stroke=color)
         annot.set_border(width=width)
         annot.update()
+        self._apply_author(annot)
         self.dirty = True
 
     def add_note(
@@ -337,6 +352,7 @@ class PdfDocument:
         """Add a sticky-note (Text) annotation. Returns its xref."""
         page = self._page(index)
         annot = page.add_text_annot(fitz.Point(*point), text)
+        self._apply_author(annot)
         self.dirty = True
         return annot.xref
 
@@ -360,6 +376,7 @@ class PdfDocument:
             fitz.Rect(*rect), text, fontsize=size, text_color=color
         )
         annot.update()
+        self._apply_author(annot)
         self.dirty = True
         return annot.xref
 
@@ -455,6 +472,29 @@ class PdfDocument:
         if annot is not None:
             page.delete_annot(annot)
             self.dirty = True
+
+    def set_default_author(self, name: str) -> None:
+        """Set the author name used for annotations added from now on."""
+        self.author = name or ""
+
+    def relabel_annotations(self, name: str) -> int:
+        """Set every existing annotation's author to ``name``.
+
+        Returns how many annotations were relabelled.
+        """
+        count = 0
+        for i in range(self.page_count):
+            page = self._doc.load_page(i)
+            for annot in page.annots() or []:
+                try:
+                    annot.set_info(title=name)
+                    annot.update()
+                    count += 1
+                except Exception:  # pragma: no cover
+                    pass
+        if count:
+            self.dirty = True
+        return count
 
     def redact(
         self, index: int, rect: tuple[float, float, float, float]

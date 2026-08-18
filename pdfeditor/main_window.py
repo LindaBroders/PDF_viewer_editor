@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QSettings, Qt
 from PySide6.QtGui import (
     QAction, QColor, QGuiApplication, QIcon, QImage, QKeySequence, QPainter, QPixmap,
 )
@@ -51,6 +51,9 @@ class MainWindow(QMainWindow):
         self._undo: list[bytes] = []
         self._redo: list[bytes] = []
         self._max_history = 40
+
+        # Author name stamped on new comments/notes/highlights (persisted).
+        self._author = self._load_author()
 
         self._view = PageView()
         self._view.edited.connect(self._on_edited)
@@ -150,6 +153,7 @@ class MainWindow(QMainWindow):
         self.act_fit_width = QAction("&Fit Width", self, triggered=self._fit_width)
         self.act_toggle_thumbs = QAction("Toggle &Thumbnails", self, shortcut="F9", triggered=self._toggle_thumbnails)
         self.act_toggle_comments = QAction("Toggle &Comments", self, shortcut="F10", triggered=self._toggle_comments)
+        self.act_set_author = QAction("Set Comment &Author…", self, triggered=self._set_comment_author)
 
         self.act_prev = QAction("&Previous Page", self, shortcut="PgUp", triggered=lambda: self._go_page(self._view.page_index - 1))
         self.act_next = QAction("&Next Page", self, shortcut="PgDown", triggered=lambda: self._go_page(self._view.page_index + 1))
@@ -220,6 +224,8 @@ class MainWindow(QMainWindow):
         m_editm.addActions([self.act_undo, self.act_redo])
         m_editm.addSeparator()
         m_editm.addAction(self.act_copy)
+        m_editm.addSeparator()
+        m_editm.addAction(self.act_set_author)
 
         m_view = mb.addMenu("&View")
         m_view.addActions([self.act_zoom_in, self.act_zoom_out, self.act_fit_width])
@@ -409,6 +415,7 @@ class MainWindow(QMainWindow):
         if self._doc:
             self._doc.close()
         self._doc = doc
+        self._doc.author = self._author
         self._undo.clear()
         self._redo.clear()
         self._view.set_document(doc)
@@ -1015,6 +1022,12 @@ class MainWindow(QMainWindow):
         title.setObjectName("commentsTitle")
         hb.addWidget(title)
         hb.addStretch(1)
+        author_btn = QToolButton()
+        author_btn.setText("Author…")
+        author_btn.setToolTip("Set the author name for new comments")
+        author_btn.setCursor(Qt.PointingHandCursor)
+        author_btn.clicked.connect(self._set_comment_author)
+        hb.addWidget(author_btn)
         col.addWidget(header)
 
         self._comments = QListWidget()
@@ -1045,6 +1058,48 @@ class MainWindow(QMainWindow):
         "Stamp": "Stamp",
     }
 
+    # -- comment author -------------------------------------------------
+
+    @staticmethod
+    def _load_author() -> str:
+        """The saved author name, defaulting to the OS login name."""
+        saved = QSettings().value("annotations/author", "", type=str)
+        if saved:
+            return saved
+        try:
+            import getpass
+            return getpass.getuser()
+        except Exception:  # pragma: no cover
+            return ""
+
+    def _set_comment_author(self) -> None:
+        """Prompt for the author name applied to comments/notes/highlights."""
+        name, ok = QInputDialog.getText(
+            self, "Comment Author", "Author name:", text=self._author
+        )
+        if not ok:
+            return
+        name = name.strip()
+        self._author = name
+        QSettings().setValue("annotations/author", name)
+        if self._doc:
+            self._doc.set_default_author(name)
+        # Offer to relabel comments already in this document.
+        if self._doc and self._doc.list_annotations():
+            resp = QMessageBox.question(
+                self, "Update existing comments",
+                "Also set this author on the comments already in this document?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            if resp == QMessageBox.Yes:
+                self._checkpoint()
+                self._doc.relabel_annotations(name)
+                self._view.refresh()
+                self._on_annotations_changed()
+        self.statusBar().showMessage(
+            f"Comment author set to “{name or '(none)'}”.", 3000
+        )
+
     def _on_annotations_changed(self) -> None:
         """An annotation was added, moved, edited or deleted — refresh panel."""
         if self._doc:
@@ -1062,7 +1117,10 @@ class MainWindow(QMainWindow):
         for a in shown:
             label = self._COMMENT_KINDS.get(a["kind"], a["kind"])
             body = (a["content"] or "").strip() or "(no text)"
-            item = QListWidgetItem(f"p.{a['page'] + 1}  ·  {label}\n{body}")
+            head = f"p.{a['page'] + 1}  ·  {label}"
+            if a["author"]:
+                head += f"  ·  {a['author']}"
+            item = QListWidgetItem(f"{head}\n{body}")
             item.setData(Qt.UserRole, (a["page"], a["xref"]))
             self._comments.addItem(item)
             if sel is not None and sel == (a["page"], a["xref"]):
