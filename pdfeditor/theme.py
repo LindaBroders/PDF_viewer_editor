@@ -98,6 +98,23 @@ QToolButton#thumbRail {{
 QToolButton#thumbRail:hover {{ background-color: {ACCENT}; }}
 QToolButton#thumbRail:pressed {{ background-color: #4a86bd; }}
 
+/* Document tabs */
+QTabWidget::pane {{ border: none; }}
+QTabBar {{ background: {BG}; qproperty-drawBase: 0; }}
+QTabBar::tab {{
+    background: {SURFACE};
+    color: {MUTED};
+    border: 1px solid {BORDER};
+    border-bottom: none;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    padding: 7px 14px;
+    margin-right: 2px;
+    max-width: 220px;
+}}
+QTabBar::tab:selected {{ background: {SURFACE_ALT}; color: {TEXT}; }}
+QTabBar::tab:hover {{ color: {TEXT}; }}
+
 /* Splitter handles between the side panels and the page area */
 QSplitter#mainSplitter::handle {{
     background-color: {BORDER};

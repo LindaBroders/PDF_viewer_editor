@@ -61,7 +61,16 @@ class _FixedDialogFilter(QObject):
                 return
             if hasattr(dialog, "setSizeGripEnabled"):
                 dialog.setSizeGripEnabled(False)
-            dialog.setFixedSize(dialog.size())
+            size = dialog.size()
+            # Make sure the window is at least wide enough to show its title:
+            # the title bar also needs room for the icon and the close/min/max
+            # buttons, so add a generous allowance beyond the text width.
+            title = dialog.windowTitle()
+            if title:
+                needed = dialog.fontMetrics().horizontalAdvance(title) + 160
+                if size.width() < needed:
+                    size.setWidth(needed)
+            dialog.setFixedSize(size)
         except RuntimeError:
             pass  # dialog already closed
 
@@ -96,9 +105,11 @@ def main(argv: list[str] | None = None) -> int:
     window.setWindowIcon(app.windowIcon())
     window.show()
 
-    # Open a file passed on the command line, if any.
+    # Open a file passed on the command line, or start with a blank document.
     if len(argv) > 1:
         window.open_document(argv[1])
+    else:
+        window.new_document()
 
     return app.exec()
 

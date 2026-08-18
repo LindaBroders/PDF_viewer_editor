@@ -5,14 +5,16 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QSettings, Qt
+from PySide6.QtCore import QEvent, QPoint, QSettings, Qt, Signal
 from PySide6.QtGui import (
-    QAction, QColor, QGuiApplication, QIcon, QImage, QKeySequence, QPainter, QPixmap,
+    QAction, QColor, QCursor, QGuiApplication, QIcon, QImage, QKeySequence,
+    QPainter, QPixmap,
 )
 from PySide6.QtWidgets import (
     QColorDialog,
     QComboBox,
     QFileDialog,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QListWidget,
@@ -21,8 +23,13 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QScrollArea,
+    QSizePolicy,
+    QSplitter,
+    QTabBar,
+    QTabWidget,
     QToolBar,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -35,119 +42,232 @@ from .viewer import PageView, Tool
 _PDF_FILTER = "PDF files (*.pdf);;All files (*)"
 
 
+class _DetachableTabBar(QTabBar):
+    """A tab bar whose tabs can be dragged out to become their own window."""
+
+    detach_requested = Signal(int, QPoint)
+    menu_requested = Signal(int, QPoint)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._drag_index = -1
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        index = self.tabAt(event.pos())
+        if index >= 0:
+            self.menu_requested.emit(index, event.globalPos())
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self._drag_index = self.tabAt(event.position().toPoint())
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        # Dragging a tab well above/below the bar tears it off into a window.
+        if self._drag_index >= 0 and (event.buttons() & Qt.LeftButton):
+            y = event.position().toPoint().y()
+            if y < -24 or y > self.height() + 40:
+                index = self._drag_index
+                self._drag_index = -1
+                self.detach_requested.emit(index, event.globalPosition().toPoint())
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._drag_index = -1
+        super().mouseReleaseEvent(event)
+
+
+class _DetachableTabWidget(QTabWidget):
+    """A tab widget with closable, movable, detachable document tabs."""
+
+    detach_requested = Signal(int, QPoint)
+    menu_requested = Signal(int, QPoint)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        bar = _DetachableTabBar(self)
+        self.setTabBar(bar)
+        self.setMovable(True)
+        self.setTabsClosable(True)
+        self.setDocumentMode(True)
+        self.setElideMode(Qt.ElideRight)
+        bar.detach_requested.connect(self.detach_requested)
+        bar.menu_requested.connect(self.menu_requested)
+
+
+class DocumentTab(QWidget):
+    """Everything specific to one open PDF: its view, thumbnail strip,
+    Comments panel, undo/redo history and per-document state.
+
+    Cross-tab signals call through ``self.win`` (the owning window) via
+    small lambdas, so moving a tab to another window only needs
+    ``self.win`` reassigned — no reconnecting.
+    """
+
+    def __init__(self, win: "MainWindow") -> None:
+        super().__init__()
+        self.win = win
+        self.doc: Optional[PdfDocument] = None
+        self.pending_signature: Optional[str] = None
+        self.undo: list[bytes] = []
+        self.redo: list[bytes] = []
+        self.left_size = 190
+        self.right_size = 260
+
+        self.view = PageView()
+        self.view.edited.connect(lambda: self.win._on_edited())
+        self.view.place_requested.connect(lambda p, x, y: self.win._on_place_requested(p, x, y))
+        self.view.rect_selected.connect(lambda p, a, b, c, d: self.win._on_rect_selected(p, a, b, c, d))
+        self.view.edit_started.connect(lambda: self.win._checkpoint())
+        self.view.area_copied.connect(lambda: self.win._on_area_copied())
+        self.view.objects_changed.connect(lambda: self.win._on_objects_changed())
+        self.view.annotations_changed.connect(lambda: self.win._on_annotations_changed())
+        self.view.annot_edit_requested.connect(lambda pg, xr: self.win._on_annot_edit_requested(pg, xr))
+        self.view.page_changed.connect(lambda i: self.win._on_visible_page_changed(i))
+        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(lambda pos: self.win._show_context_menu(pos))
+        self.view.installEventFilter(self)  # Ctrl+wheel zoom
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidget(self.view)
+        self.scroll.setAlignment(Qt.AlignCenter)
+        self.scroll.setWidgetResizable(False)
+        self.scroll.verticalScrollBar().valueChanged.connect(self.view.notify_scrolled)
+
+        self.thumbs = QListWidget()
+        self.thumbs.setMinimumWidth(96)
+        self.thumbs.setIconSize(QPixmap(140, 180).size())
+        self.thumbs.currentRowChanged.connect(lambda r: self.win._on_thumb_selected(r))
+        self.thumbs.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.thumbs.customContextMenuRequested.connect(lambda pos: self.win._thumb_context_menu(pos))
+
+        self.thumb_rail = QToolButton()
+        self.thumb_rail.setObjectName("thumbRail")
+        self.thumb_rail.setAutoRaise(True)
+        self.thumb_rail.setIcon(win._icon("prev"))
+        self.thumb_rail.setToolTip("Hide page thumbnails")
+        self.thumb_rail.setCursor(Qt.PointingHandCursor)
+        self.thumb_rail.setFixedWidth(18)
+        self.thumb_rail.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.thumb_rail.clicked.connect(lambda: self.win._toggle_thumbnails())
+
+        self.comments_panel = self._build_comments_panel(win)
+
+        self.comments_rail = QToolButton()
+        self.comments_rail.setObjectName("thumbRail")
+        self.comments_rail.setAutoRaise(True)
+        self.comments_rail.setIcon(win._icon("next"))
+        self.comments_rail.setToolTip("Hide comments")
+        self.comments_rail.setCursor(Qt.PointingHandCursor)
+        self.comments_rail.setFixedWidth(18)
+        self.comments_rail.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.comments_rail.clicked.connect(lambda: self.win._toggle_comments())
+
+        self.left_wrap = QWidget()
+        lw = QHBoxLayout(self.left_wrap)
+        lw.setContentsMargins(0, 0, 0, 0)
+        lw.setSpacing(0)
+        lw.addWidget(self.thumbs, 1)
+        lw.addWidget(self.thumb_rail)
+
+        self.right_wrap = QWidget()
+        rw = QHBoxLayout(self.right_wrap)
+        rw.setContentsMargins(0, 0, 0, 0)
+        rw.setSpacing(0)
+        rw.addWidget(self.comments_rail)
+        rw.addWidget(self.comments_panel, 1)
+
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setObjectName("mainSplitter")
+        self.splitter.setHandleWidth(5)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.addWidget(self.left_wrap)
+        self.splitter.addWidget(self.scroll)
+        self.splitter.addWidget(self.right_wrap)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setStretchFactor(2, 0)
+        self.splitter.setSizes([190, 820, 260])
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self.splitter)
+
+    def _build_comments_panel(self, win: "MainWindow") -> QWidget:
+        panel = QWidget()
+        panel.setObjectName("commentsPanel")
+        panel.setMinimumWidth(150)
+        col = QVBoxLayout(panel)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+
+        header = QWidget()
+        hb = QHBoxLayout(header)
+        hb.setContentsMargins(10, 8, 8, 8)
+        title = QLabel("Comments")
+        title.setObjectName("commentsTitle")
+        hb.addWidget(title)
+        hb.addStretch(1)
+        author_btn = QToolButton()
+        author_btn.setText("Author…")
+        author_btn.setToolTip("Set the author name for new comments")
+        author_btn.setCursor(Qt.PointingHandCursor)
+        author_btn.clicked.connect(lambda: self.win._set_comment_author())
+        hb.addWidget(author_btn)
+        col.addWidget(header)
+
+        self.comments = QListWidget()
+        self.comments.setObjectName("commentsList")
+        self.comments.setWordWrap(True)
+        self.comments.itemClicked.connect(lambda it: self.win._on_comment_clicked(it))
+        self.comments.itemDoubleClicked.connect(lambda it: self.win._on_comment_double_clicked(it))
+        self.comments.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.comments.customContextMenuRequested.connect(lambda pos: self.win._comment_context_menu(pos))
+        col.addWidget(self.comments, 1)
+
+        self.comments_empty = QLabel(
+            "No comments yet.\nUse the Note, Text or\nHighlight tools to add some."
+        )
+        self.comments_empty.setObjectName("commentsEmpty")
+        self.comments_empty.setAlignment(Qt.AlignCenter)
+        self.comments_empty.setWordWrap(True)
+        col.addWidget(self.comments_empty)
+        col.setStretchFactor(self.comments, 1)
+        return panel
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        if obj is self.view and event.type() == QEvent.Wheel and self.doc:
+            if event.modifiers() & Qt.ControlModifier:
+                self.win._zoom_at_cursor(event)
+                return True
+        return super().eventFilter(obj, event)
+
+
 class MainWindow(QMainWindow):
     """Top-level window tying the document model to the viewer widget."""
+
+    # Keep detached windows alive (they'd be garbage-collected otherwise).
+    _windows: list = []
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("PDF Viewer & Editor")
         self.resize(1200, 800)
 
-        self._doc: Optional[PdfDocument] = None
-        # When set, the next image-placement drag stamps this file (a prepared
-        # signature/initials PNG) instead of prompting for a file.
-        self._pending_signature: Optional[str] = None
-        # Undo/redo history — full-document snapshots (bytes).
-        self._undo: list[bytes] = []
-        self._redo: list[bytes] = []
         self._max_history = 40
-
         # Author name stamped on new comments/notes/highlights (persisted).
         self._author = self._load_author()
 
-        self._view = PageView()
-        self._view.edited.connect(self._on_edited)
-        self._view.place_requested.connect(self._on_place_requested)
-        self._view.rect_selected.connect(self._on_rect_selected)
-        self._view.edit_started.connect(self._checkpoint)
-        self._view.area_copied.connect(self._on_area_copied)
-        self._view.objects_changed.connect(self._on_objects_changed)
-        self._view.annotations_changed.connect(self._on_annotations_changed)
-        self._view.annot_edit_requested.connect(self._on_annot_edit_requested)
-
-        self._scroll = QScrollArea()
-        self._scroll.setWidget(self._view)
-        self._scroll.setAlignment(Qt.AlignCenter)
-        self._scroll.setWidgetResizable(False)
-        # Track scrolling so the page counter and thumbnail highlight follow.
-        self._scroll.verticalScrollBar().valueChanged.connect(self._view.notify_scrolled)
-        self._view.page_changed.connect(self._on_visible_page_changed)
-        # Ctrl + mouse wheel = zoom (handled in eventFilter, anchored on cursor).
-        self._view.installEventFilter(self)
-        # Right-click context menu.
-        self._view.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._view.customContextMenuRequested.connect(self._show_context_menu)
-
-        self._thumbs = QListWidget()
-        self._thumbs.setMinimumWidth(96)
-        self._thumbs.setIconSize(QPixmap(140, 180).size())
-        self._thumbs.currentRowChanged.connect(self._on_thumb_selected)
-        self._thumbs.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._thumbs.customContextMenuRequested.connect(self._thumb_context_menu)
-
-        central = QWidget()
-        from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QSplitter
-
-        # Left area: the thumbnail list plus a full-height grey rail on its
-        # right edge. Clicking anywhere on the rail collapses/expands the list.
-        self._thumb_rail = QToolButton()
-        self._thumb_rail.setObjectName("thumbRail")
-        self._thumb_rail.setAutoRaise(True)
-        self._thumb_rail.setIcon(self._icon("prev"))
-        self._thumb_rail.setToolTip("Hide page thumbnails")
-        self._thumb_rail.setCursor(Qt.PointingHandCursor)
-        self._thumb_rail.setFixedWidth(18)
-        self._thumb_rail.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self._thumb_rail.clicked.connect(self._toggle_thumbnails)
-
-        self._comments_panel = self._build_comments_panel()
-
-        # Right area: a full-height rail on the inner edge of the Comments
-        # panel — click anywhere on it to collapse/expand the panel.
-        self._comments_rail = QToolButton()
-        self._comments_rail.setObjectName("thumbRail")
-        self._comments_rail.setAutoRaise(True)
-        self._comments_rail.setIcon(self._icon("next"))
-        self._comments_rail.setToolTip("Hide comments")
-        self._comments_rail.setCursor(Qt.PointingHandCursor)
-        self._comments_rail.setFixedWidth(18)
-        self._comments_rail.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self._comments_rail.clicked.connect(self._toggle_comments)
-
-        # Left container: thumbnails + collapse rail on its right edge.
-        self._left_wrap = QWidget()
-        lw = QHBoxLayout(self._left_wrap)
-        lw.setContentsMargins(0, 0, 0, 0)
-        lw.setSpacing(0)
-        lw.addWidget(self._thumbs, 1)
-        lw.addWidget(self._thumb_rail)
-
-        # Right container: collapse rail on its left edge + comments panel.
-        self._right_wrap = QWidget()
-        rw = QHBoxLayout(self._right_wrap)
-        rw.setContentsMargins(0, 0, 0, 0)
-        rw.setSpacing(0)
-        rw.addWidget(self._comments_rail)
-        rw.addWidget(self._comments_panel, 1)
-
-        # A splitter lets the user drag the dividers to resize both panels.
-        self._splitter = QSplitter(Qt.Horizontal)
-        self._splitter.setObjectName("mainSplitter")
-        self._splitter.setHandleWidth(5)
-        self._splitter.setChildrenCollapsible(False)
-        self._splitter.addWidget(self._left_wrap)
-        self._splitter.addWidget(self._scroll)
-        self._splitter.addWidget(self._right_wrap)
-        self._splitter.setStretchFactor(0, 0)
-        self._splitter.setStretchFactor(1, 1)   # the page area takes the slack
-        self._splitter.setStretchFactor(2, 0)
-        self._splitter.setSizes([190, 820, 260])
-
-        layout = QHBoxLayout(central)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self._splitter)
-        self.setCentralWidget(central)
+        # One tab per open PDF; tabs can be reordered, closed, and torn off
+        # into their own window.
+        self._tabs = _DetachableTabWidget()
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._tabs.tabCloseRequested.connect(self._close_tab)
+        self._tabs.detach_requested.connect(self._detach_tab)
+        self._tabs.menu_requested.connect(self._tab_menu)
+        self.setCentralWidget(self._tabs)
 
         self._page_label = QLabel("No document")
         self.statusBar().addPermanentWidget(self._page_label)
@@ -156,7 +276,121 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self._build_toolbar()
         self._update_enabled()
-        self._set_tool(Tool.SELECT)  # start with the text-selection cursor
+
+    # -- open documents (one per tab) -----------------------------------
+
+    @property
+    def _tab(self) -> Optional[DocumentTab]:
+        w = self._tabs.currentWidget()
+        return w if isinstance(w, DocumentTab) else None
+
+    # These proxy the "current document" widgets/state so the rest of the
+    # window can keep referring to self._doc, self._view, ... unchanged.
+    @property
+    def _doc(self) -> Optional[PdfDocument]:
+        t = self._tab
+        return t.doc if t else None
+
+    @_doc.setter
+    def _doc(self, value) -> None:
+        t = self._tab
+        if t is not None:
+            t.doc = value
+
+    @property
+    def _view(self):
+        t = self._tab
+        return t.view if t else None
+
+    @property
+    def _thumbs(self):
+        t = self._tab
+        return t.thumbs if t else None
+
+    @property
+    def _comments(self):
+        t = self._tab
+        return t.comments if t else None
+
+    @property
+    def _comments_empty(self):
+        t = self._tab
+        return t.comments_empty if t else None
+
+    @property
+    def _comments_panel(self):
+        t = self._tab
+        return t.comments_panel if t else None
+
+    @property
+    def _comments_rail(self):
+        t = self._tab
+        return t.comments_rail if t else None
+
+    @property
+    def _thumb_rail(self):
+        t = self._tab
+        return t.thumb_rail if t else None
+
+    @property
+    def _scroll(self):
+        t = self._tab
+        return t.scroll if t else None
+
+    @property
+    def _splitter(self):
+        t = self._tab
+        return t.splitter if t else None
+
+    @property
+    def _undo(self) -> list:
+        t = self._tab
+        return t.undo if t else []
+
+    @property
+    def _redo(self) -> list:
+        t = self._tab
+        return t.redo if t else []
+
+    @property
+    def _pending_signature(self):
+        t = self._tab
+        return t.pending_signature if t else None
+
+    @_pending_signature.setter
+    def _pending_signature(self, value) -> None:
+        t = self._tab
+        if t is not None:
+            t.pending_signature = value
+
+    @property
+    def _left_size(self) -> int:
+        t = self._tab
+        return t.left_size if t else 190
+
+    @_left_size.setter
+    def _left_size(self, value) -> None:
+        t = self._tab
+        if t is not None:
+            t.left_size = value
+
+    @property
+    def _right_size(self) -> int:
+        t = self._tab
+        return t.right_size if t else 260
+
+    @_right_size.setter
+    def _right_size(self, value) -> None:
+        t = self._tab
+        if t is not None:
+            t.right_size = value
+
+    def _add_tab(self, doc: PdfDocument) -> None:
+        """Open a document in a new tab and make it current."""
+        tab = DocumentTab(self)
+        index = self._tabs.addTab(tab, "…")
+        self._tabs.setCurrentIndex(index)
+        self._load_document(doc)
 
     # -- UI construction ------------------------------------------------
 
@@ -375,17 +609,19 @@ class MainWindow(QMainWindow):
     # -- document lifecycle --------------------------------------------
 
     def new_document(self) -> None:
-        if not self._confirm_discard():
-            return
-        self._set_document(PdfDocument.new())
+        self._add_tab(PdfDocument.new())
 
     def open_document(self, path: Optional[str] = None) -> None:
-        if not self._confirm_discard():
-            return
         if not path:
             path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", _PDF_FILTER)
         if not path:
             return
+        # If this file is already open in a tab, just switch to it.
+        for i in range(self._tabs.count()):
+            tab = self._tabs.widget(i)
+            if isinstance(tab, DocumentTab) and tab.doc and tab.doc.path == path:
+                self._tabs.setCurrentIndex(i)
+                return
         try:
             doc = PdfDocument.open(path)
         except DocumentError as exc:
@@ -397,7 +633,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Locked", "Could not unlock the document.")
                 doc.close()
                 return
-        self._set_document(doc)
+        self._add_tab(doc)
 
     def save_document(self) -> bool:
         if not self._doc:
@@ -438,13 +674,18 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Saved to {os.path.basename(path)}.", 3000)
         return True
 
-    def _set_document(self, doc: PdfDocument) -> None:
-        if self._doc:
-            self._doc.close()
-        self._doc = doc
-        self._doc.author = self._author
-        self._undo.clear()
-        self._redo.clear()
+    def _load_document(self, doc: PdfDocument) -> None:
+        """Load a document into the current tab."""
+        t = self._tab
+        if t is None:
+            self._add_tab(doc)
+            return
+        if t.doc is not None and t.doc is not doc:
+            t.doc.close()
+        t.doc = doc
+        doc.author = self._author
+        t.undo.clear()
+        t.redo.clear()
         self._view.set_document(doc)
         self._view.fit_width(self._scroll.viewport().width())
         self._rebuild_thumbnails()
@@ -453,6 +694,88 @@ class MainWindow(QMainWindow):
         self._update_undo_actions()
         self._update_title()
         self._update_page_label()
+        self._update_tab_text()
+
+    # -- tab management -------------------------------------------------
+
+    def _tab_label(self, doc: Optional[PdfDocument]) -> str:
+        if doc is None:
+            return "Untitled"
+        name = os.path.basename(doc.path) if doc.path else "Untitled"
+        return ("• " if doc.dirty else "") + name
+
+    def _update_tab_text(self) -> None:
+        index = self._tabs.currentIndex()
+        if index >= 0:
+            self._tabs.setTabText(index, self._tab_label(self._doc))
+            if self._doc and self._doc.path:
+                self._tabs.setTabToolTip(index, self._doc.path)
+
+    def _on_tab_changed(self, index: int) -> None:
+        """Refresh the toolbar/menus/status for the newly selected tab."""
+        self._update_enabled()
+        self._update_undo_actions()
+        self._update_title()
+        self._update_page_label()
+        if self._view is not None:
+            self._set_tool(self._view.tool)
+            self._tool_box.blockSignals(True)
+            self._tool_box.setCurrentIndex(self._tool_index(self._view.tool))
+            self._tool_box.blockSignals(False)
+
+    def _close_tab(self, index: int) -> None:
+        tab = self._tabs.widget(index)
+        if not isinstance(tab, DocumentTab):
+            return
+        self._tabs.setCurrentIndex(index)
+        if not self._confirm_discard():
+            return
+        if tab.doc is not None:
+            tab.doc.close()
+        self._tabs.removeTab(index)
+        tab.deleteLater()
+        if self._tabs.count() == 0:
+            self._update_enabled()
+            self._update_title()
+            self._update_page_label()
+
+    def _detach_tab(self, index: int, global_pos: QPoint) -> None:
+        """Tear a tab off into its own window."""
+        tab = self._tabs.widget(index)
+        if not isinstance(tab, DocumentTab):
+            return
+        if self._tabs.count() <= 1:
+            return  # nothing gained by detaching the only tab
+        title = self._tabs.tabText(index)
+        tip = self._tabs.tabToolTip(index)
+        self._tabs.removeTab(index)          # reparents the widget out
+        win = MainWindow()
+        win._adopt_tab(tab, title, tip)
+        win.resize(self.size())
+        win.move(global_pos - QPoint(120, 20))
+        win.show()
+        MainWindow._windows.append(win)
+
+    def _tab_menu(self, index: int, global_pos: QPoint) -> None:
+        menu = QMenu(self)
+        act_detach = menu.addAction("Move to New Window")
+        act_detach.setEnabled(self._tabs.count() > 1)
+        menu.addSeparator()
+        act_close = menu.addAction("Close Tab")
+        chosen = menu.exec(global_pos)
+        if chosen == act_detach:
+            self._detach_tab(index, global_pos)
+        elif chosen == act_close:
+            self._close_tab(index)
+
+    def _adopt_tab(self, tab: DocumentTab, title: str, tip: str = "") -> None:
+        """Take ownership of a tab detached from another window."""
+        tab.win = self
+        index = self._tabs.addTab(tab, title)
+        if tip:
+            self._tabs.setTabToolTip(index, tip)
+        self._tabs.setCurrentIndex(index)
+        self._on_tab_changed(index)
 
     # -- editing actions ------------------------------------------------
 
@@ -1031,51 +1354,6 @@ class MainWindow(QMainWindow):
 
     # -- Comments panel (live annotations) ------------------------------
 
-    def _build_comments_panel(self) -> QWidget:
-        """The Adobe-style list of comments/notes/highlights on the right."""
-        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
-
-        panel = QWidget()
-        panel.setObjectName("commentsPanel")
-        panel.setMinimumWidth(150)
-        col = QVBoxLayout(panel)
-        col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(0)
-
-        header = QWidget()
-        hb = QHBoxLayout(header)
-        hb.setContentsMargins(10, 8, 8, 8)
-        title = QLabel("Comments")
-        title.setObjectName("commentsTitle")
-        hb.addWidget(title)
-        hb.addStretch(1)
-        author_btn = QToolButton()
-        author_btn.setText("Author…")
-        author_btn.setToolTip("Set the author name for new comments")
-        author_btn.setCursor(Qt.PointingHandCursor)
-        author_btn.clicked.connect(self._set_comment_author)
-        hb.addWidget(author_btn)
-        col.addWidget(header)
-
-        self._comments = QListWidget()
-        self._comments.setObjectName("commentsList")
-        self._comments.setWordWrap(True)
-        self._comments.itemClicked.connect(self._on_comment_clicked)
-        self._comments.itemDoubleClicked.connect(self._on_comment_double_clicked)
-        self._comments.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._comments.customContextMenuRequested.connect(self._comment_context_menu)
-        col.addWidget(self._comments, 1)
-
-        self._comments_empty = QLabel(
-            "No comments yet.\nUse the Note, Text or\nHighlight tools to add some."
-        )
-        self._comments_empty.setObjectName("commentsEmpty")
-        self._comments_empty.setAlignment(Qt.AlignCenter)
-        self._comments_empty.setWordWrap(True)
-        col.addWidget(self._comments_empty)
-        col.setStretchFactor(self._comments, 1)
-        return panel
-
     # Which annotation kinds show up in the Comments list.
     _COMMENT_KINDS = {
         "Text": "Note", "FreeText": "Text", "Highlight": "Highlight",
@@ -1165,6 +1443,8 @@ class MainWindow(QMainWindow):
         self._rebuild_comments()
 
     def _rebuild_comments(self) -> None:
+        if self._comments is None:
+            return
         self._comments.clear()
         annots = self._doc.list_annotations() if self._doc else []
         shown = [a for a in annots if a["kind"] in self._COMMENT_KINDS]
@@ -1474,6 +1754,8 @@ class MainWindow(QMainWindow):
         )
 
     def _set_tool(self, tool: Tool) -> None:
+        if self._view is None:
+            return
         self._view.tool = tool
         # Base cursor; in Select mode hover refines it to I-beam over text,
         # move/resize over a placed object, and plain arrow otherwise.
@@ -1818,6 +2100,8 @@ class MainWindow(QMainWindow):
     # -- thumbnails -----------------------------------------------------
 
     def _rebuild_thumbnails(self) -> None:
+        if self._thumbs is None:
+            return
         self._thumbs.blockSignals(True)
         self._thumbs.clear()
         if self._doc:
@@ -1872,11 +2156,13 @@ class MainWindow(QMainWindow):
         self._tool_box.setEnabled(has)
 
     def _update_title(self) -> None:
-        name = "Untitled"
-        if self._doc and self._doc.path:
-            name = os.path.basename(self._doc.path)
-        dirty = "*" if (self._doc and self._doc.dirty) else ""
+        if self._doc is None:
+            self.setWindowTitle("PDF Viewer & Editor")
+            return
+        name = os.path.basename(self._doc.path) if self._doc.path else "Untitled"
+        dirty = "*" if self._doc.dirty else ""
         self.setWindowTitle(f"{dirty}{name} — PDF Viewer & Editor")
+        self._update_tab_text()
 
     def _update_page_label(self) -> None:
         if self._doc:
@@ -1903,9 +2189,16 @@ class MainWindow(QMainWindow):
         return choice == QMessageBox.Discard
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
-        if self._confirm_discard():
-            if self._doc:
-                self._doc.close()
-            event.accept()
-        else:
-            event.ignore()
+        # Confirm and close every open tab before the window goes away.
+        while self._tabs.count():
+            self._tabs.setCurrentIndex(0)
+            if not self._confirm_discard():
+                event.ignore()
+                return
+            tab = self._tabs.widget(0)
+            if isinstance(tab, DocumentTab) and tab.doc is not None:
+                tab.doc.close()
+            self._tabs.removeTab(0)
+        if self in MainWindow._windows:
+            MainWindow._windows.remove(self)
+        event.accept()
