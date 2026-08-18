@@ -223,30 +223,50 @@ class PdfDocument:
         page.insert_image(fitz.Rect(*rect), filename=image_path)
         self.dirty = True
 
-    def stamp_images(self, overlays: list) -> None:
-        """Permanently stamp a list of overlay images into the document.
+    @staticmethod
+    def _apply_overlay(page, o: dict) -> None:
+        """Flatten one overlay object onto a page.
 
-        Each overlay is ``{"page", "rect": [x0,y0,x1,y1], "path"}``.
+        ``kind`` selects how: ``image`` stamps a picture, ``text`` writes real
+        (selectable) text, ``note`` adds a sticky-note annotation.
+        """
+        kind = o.get("kind", "image")
+        rect = o["rect"]
+        if kind == "text":
+            size = float(o.get("size", 11.0))
+            page.insert_text(
+                fitz.Point(rect[0], rect[1] + size * 0.8),
+                o["text"],
+                fontsize=size,
+                color=tuple(o.get("color", (0, 0, 0))),
+            )
+        elif kind == "note":
+            page.add_text_annot(fitz.Point(rect[0], rect[1]), o["text"])
+        else:
+            page.insert_image(
+                fitz.Rect(*rect), filename=o["path"], keep_proportion=True
+            )
+
+    def stamp_images(self, overlays: list) -> None:
+        """Permanently flatten a list of overlay objects into the document.
+
+        Each overlay is a kind-tagged dict (see :meth:`_apply_overlay`).
         """
         for o in overlays:
-            self._page(o["page"]).insert_image(
-                fitz.Rect(*o["rect"]), filename=o["path"], keep_proportion=True
-            )
+            self._apply_overlay(self._page(o["page"]), o)
         if overlays:
             self.dirty = True
 
     def save_with_overlays(self, path: str, overlays: list) -> str:
-        """Save a copy with overlay images stamped in, without baking them into
-        the live document (so they stay editable in the session)."""
+        """Save a copy with overlay objects flattened in, without baking them
+        into the live document (so they stay editable in the session)."""
         if not overlays:
             return self.save(path)
         data = self._doc.tobytes()
         out = fitz.open("pdf", data)
         try:
             for o in overlays:
-                out.load_page(o["page"]).insert_image(
-                    fitz.Rect(*o["rect"]), filename=o["path"], keep_proportion=True
-                )
+                self._apply_overlay(out.load_page(o["page"]), o)
             out.save(path, garbage=4, deflate=True)
         finally:
             out.close()

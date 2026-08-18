@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
         self._view.edit_started.connect(self._checkpoint)
         self._view.area_copied.connect(self._on_area_copied)
         self._view.objects_changed.connect(self._on_objects_changed)
+        self._view.object_edit_requested.connect(self._on_object_edit_requested)
 
         self._scroll = QScrollArea()
         self._scroll.setWidget(self._view)
@@ -505,15 +506,13 @@ class MainWindow(QMainWindow):
         if self._view.tool == Tool.TEXT:
             text, ok = QInputDialog.getMultiLineText(self, "Insert Text", "Text:")
             if ok and text:
-                self._checkpoint()
-                self._doc.add_text(page, (x, y + 11), text)
+                self._view.add_text_object(page, x, y, text)
         elif self._view.tool == Tool.NOTE:
             text, ok = QInputDialog.getMultiLineText(self, "Sticky Note", "Note:")
             if ok and text:
-                self._checkpoint()
-                self._doc.add_note(page, (x, y), text)
-        self._view.refresh()
-        self._on_edited()
+                self._view.add_note_object(page, x, y, text)
+        # Back to Select so the new item can be dragged/edited right away.
+        self._tool_box.setCurrentIndex(self._tool_index(Tool.SELECT))
 
     def _on_rect_selected(self, page: int, x0: float, y0: float, x1: float, y1: float) -> None:
         """Handle tools that drag a rectangle and need extra input."""
@@ -1307,18 +1306,25 @@ class MainWindow(QMainWindow):
     def _insert_text_at(self, idx: int, x: float, y: float) -> None:
         text, ok = QInputDialog.getMultiLineText(self, "Insert Text", "Text:")
         if ok and text:
-            self._checkpoint()
-            self._doc.add_text(idx, (x, y + 11), text)
-            self._view.refresh()
-            self._on_edited()
+            self._view.add_text_object(idx, x, y, text)
 
     def _note_at(self, idx: int, x: float, y: float) -> None:
         text, ok = QInputDialog.getMultiLineText(self, "Sticky Note", "Note:")
         if ok and text:
-            self._checkpoint()
-            self._doc.add_note(idx, (x, y), text)
-            self._view.refresh()
-            self._on_edited()
+            self._view.add_note_object(idx, x, y, text)
+
+    def _on_object_edit_requested(self, i: int) -> None:
+        """Double-clicked a placed text/note object — edit its content."""
+        kind = self._view.object_kind(i)
+        current = self._view.object_text(i)
+        if kind == "text":
+            text, ok = QInputDialog.getMultiLineText(self, "Edit Text", "Text:", current)
+        elif kind == "note":
+            text, ok = QInputDialog.getMultiLineText(self, "Edit Note", "Note:", current)
+        else:
+            return
+        if ok:
+            self._view.update_text_object(i, text)
 
     def _copy_page_text(self) -> None:
         if not self._doc:

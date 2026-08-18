@@ -15,6 +15,8 @@ from typing import Optional
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
+    QFont,
+    QFontMetrics,
     QImage,
     QKeyEvent,
     QKeySequence,
@@ -24,7 +26,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
 )
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QWidget
 
 from .document import PdfDocument
 
@@ -64,6 +66,8 @@ class PageView(QWidget):
     area_copied = Signal()
     # Emitted whenever the editable object layer changes (add/move/resize/delete).
     objects_changed = Signal()
+    # Emitted (object index) when a text/note object is double-clicked to edit.
+    object_edit_requested = Signal(int)
 
     GAP = 18  # pixels of grey between stacked pages
 
@@ -90,6 +94,7 @@ class PageView(QWidget):
         self._drag_now: Optional[QPoint] = None
         self._ink_stroke: list[QPoint] = []
         self._active: Optional[dict] = None  # page a drag started on
+        self._pan: Optional[dict] = None     # active hand-tool pan gesture
 
         # New image/signature riding the cursor until it is dropped.
         self._place_pix: Optional[QPixmap] = None
@@ -98,8 +103,16 @@ class PageView(QWidget):
         self._place_following = False
         self._place_page: Optional[dict] = None
 
-        # Persistent, editable placed objects (signatures/images). Each:
-        #   {page, rect:[x0,y0,x1,y1] in PDF points, pixmap, path}
+        # Persistent, editable placed objects. Every inserted item lives here so
+        # it can be selected, moved, resized, edited and deleted, then flattened
+        # into the PDF on save. Each object is a dict with:
+        #   kind:  "image" | "text" | "note"
+        #   page:  page index
+        #   rect:  [x0, y0, x1, y1] in PDF points
+        #   pixmap: on-canvas preview
+        #   image -> path
+        #   text  -> text, size, color, base_w, base_h
+        #   note  -> text, base_w, base_h
         self._objects: list[dict] = []
         self._sel_obj = -1
         self._obj_mode: Optional[str] = None          # None | "move" | "resize"
@@ -199,8 +212,26 @@ class PageView(QWidget):
         self._cancel_placement()
 
     def overlay_objects(self) -> list:
-        """Objects for saving: [{page, rect, path}, ...]."""
-        return [{"page": o["page"], "rect": list(o["rect"]), "path": o["path"]} for o in self._objects]
+        """Objects for saving/flattening, tagged by kind so the document layer
+        can stamp images, write real text, or add note annotations."""
+        out = []
+        for o in self._objects:
+            kind = o.get("kind", "image")
+            rect = list(o["rect"])
+            if kind == "text":
+                # Font scales with the box: derive the effective point size from
+                # how much the object was resized relative to its natural height.
+                base_h = o.get("base_h") or (rect[3] - rect[1]) or 1
+                eff = o["size"] * ((rect[3] - rect[1]) / base_h)
+                out.append({"kind": "text", "page": o["page"], "rect": rect,
+                            "text": o["text"], "size": eff, "color": list(o["color"])})
+            elif kind == "note":
+                out.append({"kind": "note", "page": o["page"], "rect": rect,
+                            "text": o["text"]})
+            else:
+                out.append({"kind": "image", "page": o["page"], "rect": rect,
+                            "path": o["path"]})
+        return out
 
     def has_objects(self) -> bool:
         return bool(self._objects)
@@ -216,6 +247,106 @@ class PageView(QWidget):
             self._sel_obj = -1
             self.objects_changed.emit()
             self.update()
+
+    # -- text / note objects (editable, flattened to real PDF content) --
+
+    _TEXT_SS = 4  # supersample: canvas pixels rendered per PDF point
+
+    def _render_text_pixmap(self, text: str, size: float,
+                            color: tuple) -> tuple[QPixmap, float, float]:
+        """Render text to a transparent pixmap. Returns (pixmap, w_pts, h_pts)."""
+        font = QFont("Helvetica")
+        font.setPixelSize(max(4, round(size * self._TEXT_SS)))
+        fm = QFontMetrics(font)
+        lines = text.split("\n") or [""]
+        w = max((fm.horizontalAdvance(ln) for ln in lines), default=1) + 6
+        line_h = fm.height()
+        h = line_h * len(lines) + 6
+        pix = QPixmap(max(1, w), max(1, h))
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setFont(font)
+        p.setPen(QColor.fromRgbF(*color))
+        y = fm.ascent() + 3
+        for ln in lines:
+            p.drawText(3, y, ln)
+            y += line_h
+        p.end()
+        return pix, w / self._TEXT_SS, h / self._TEXT_SS
+
+    def _render_note_pixmap(self) -> tuple[QPixmap, float, float]:
+        """Render a small sticky-note icon. Returns (pixmap, w_pts, h_pts)."""
+        s = 22  # points
+        px = round(s * self._TEXT_SS)
+        pix = QPixmap(px, px)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(QColor(255, 214, 0))
+        p.setPen(QPen(QColor(180, 150, 0), self._TEXT_SS))
+        r = self._TEXT_SS
+        p.drawRoundedRect(r, r, px - 2 * r, px - 2 * r, 2 * r, 2 * r)
+        p.setPen(QPen(QColor(120, 100, 0), max(1, self._TEXT_SS // 2)))
+        for i in range(1, 4):
+            yy = round(px * 0.25 * i)
+            p.drawLine(round(px * 0.25), yy, round(px * 0.75), yy)
+        p.end()
+        return pix, float(s), float(s)
+
+    def add_text_object(self, page_index: int, x: float, y: float, text: str,
+                        size: float = 14.0, color: tuple = (0, 0, 0)) -> None:
+        """Insert editable text as a selectable overlay object."""
+        pix, bw, bh = self._render_text_pixmap(text, size, color)
+        self._objects.append({
+            "kind": "text", "page": page_index, "rect": [x, y, x + bw, y + bh],
+            "pixmap": pix, "text": text, "size": size, "color": list(color),
+            "base_w": bw, "base_h": bh,
+        })
+        self._sel_obj = len(self._objects) - 1
+        self.objects_changed.emit()
+        self.update()
+
+    def add_note_object(self, page_index: int, x: float, y: float, text: str) -> None:
+        """Insert an editable sticky note as a selectable overlay object."""
+        pix, bw, bh = self._render_note_pixmap()
+        self._objects.append({
+            "kind": "note", "page": page_index, "rect": [x, y, x + bw, y + bh],
+            "pixmap": pix, "text": text, "base_w": bw, "base_h": bh,
+        })
+        self._sel_obj = len(self._objects) - 1
+        self.objects_changed.emit()
+        self.update()
+
+    def object_kind(self, i: int) -> Optional[str]:
+        if 0 <= i < len(self._objects):
+            return self._objects[i].get("kind", "image")
+        return None
+
+    def object_text(self, i: int) -> str:
+        if 0 <= i < len(self._objects):
+            return self._objects[i].get("text", "")
+        return ""
+
+    def update_text_object(self, i: int, new_text: str) -> None:
+        """Replace the text of a text/note object (empty text deletes it)."""
+        if not (0 <= i < len(self._objects)):
+            return
+        o = self._objects[i]
+        if not new_text:
+            del self._objects[i]
+            self._sel_obj = -1
+            self.objects_changed.emit()
+            self.update()
+            return
+        if o.get("kind") == "text":
+            pix, bw, bh = self._render_text_pixmap(new_text, o["size"], tuple(o["color"]))
+            x0, y0 = o["rect"][0], o["rect"][1]
+            o.update(text=new_text, pixmap=pix, base_w=bw, base_h=bh,
+                     rect=[x0, y0, x0 + bw, y0 + bh])
+        else:
+            o["text"] = new_text
+        self.objects_changed.emit()
+        self.update()
 
     def _object_widget_rect(self, o: dict) -> Optional[QRect]:
         pg = self._page_layout(o["page"])
@@ -304,6 +435,15 @@ class PageView(QWidget):
         for pg in self._pages:
             if pg["index"] == index:
                 return pg
+        return None
+
+    def _scroll_area(self) -> Optional[QAbstractScrollArea]:
+        """The QScrollArea this view lives in (for hand-tool panning)."""
+        w = self.parentWidget()
+        while w is not None:
+            if isinstance(w, QAbstractScrollArea):
+                return w
+            w = w.parentWidget()
         return None
 
     def _word_layout(self, idx: int):
@@ -568,33 +708,45 @@ class PageView(QWidget):
             self._drop_placement(pos)
             return
 
-        # 2) Editable placed-object interaction (only in Select / Hand tools).
-        if self.tool in (Tool.SELECT, Tool.HAND):
-            corner = self._obj_corner_at(pos)
-            if corner >= 0:
-                self._obj_mode = "resize"
-                self._obj_corner = corner
-                return
-            hit = self._hit_object(pos)
-            if hit >= 0:
-                self._sel_obj = hit
-                self._obj_mode = "move"
-                wr = self._object_widget_rect(self._objects[hit])
-                self._obj_grab = pos - wr.topLeft()
-                self.update()
-                return
-            if self._sel_obj != -1:   # clicked empty space -> deselect object
-                self._sel_obj = -1
-                self.update()
+        # 2) Editable placed-object interaction (move/resize) — in ANY tool, so
+        #    a just-inserted signature/image can be repositioned by hovering
+        #    over it and dragging, no need to switch back to the Select tool.
+        corner = self._obj_corner_at(pos)
+        if corner >= 0:
+            self._obj_mode = "resize"
+            self._obj_corner = corner
+            return
+        hit = self._hit_object(pos)
+        if hit >= 0:
+            self._sel_obj = hit
+            self._obj_mode = "move"
+            wr = self._object_widget_rect(self._objects[hit])
+            self._obj_grab = pos - wr.topLeft()
+            self.update()
+            return
+        if self._sel_obj != -1:   # clicked empty space -> deselect object
+            self._sel_obj = -1
+            self.update()
+
+        # 3) Hand tool: drag anywhere to pan the page (works over grey too).
+        if self.tool == Tool.HAND:
+            area = self._scroll_area()
+            if area is not None:
+                self._pan = {
+                    "start": event.globalPosition().toPoint(),
+                    "hbar": area.horizontalScrollBar(),
+                    "vbar": area.verticalScrollBar(),
+                    "h0": area.horizontalScrollBar().value(),
+                    "v0": area.verticalScrollBar().value(),
+                }
+                self.setCursor(Qt.ClosedHandCursor)
+            return
 
         page = self._hit_test(pos)
         if page is None:
             return
         self._active = page
 
-        if self.tool == Tool.HAND:
-            self._active = None  # let the scroll area handle panning
-            return
         if self.tool == Tool.SELECT:
             self.clear_selection()
             self._drag_start = pos
@@ -616,11 +768,17 @@ class PageView(QWidget):
         if self._placing():
             self._drop_placement(event.position().toPoint())
             return
+        pos = event.position().toPoint()
+        # Double-clicking a text/note object opens it for editing (any tool).
+        hit = self._hit_object(pos)
+        if hit >= 0:
+            self._sel_obj = hit
+            self.update()
+            if self._objects[hit].get("kind") in ("text", "note"):
+                self.object_edit_requested.emit(hit)
+            return
         if not self._doc or event.button() != Qt.LeftButton or self.tool != Tool.SELECT:
             super().mouseDoubleClickEvent(event)
-            return
-        pos = event.position().toPoint()
-        if self._hit_object(pos) >= 0:   # a placed object, not text
             return
         page = self._hit_test(pos)
         if page is None:
@@ -638,6 +796,11 @@ class PageView(QWidget):
             self._place_rect.moveCenter(pos)
             self._place_page = self._hit_test(pos)
             self.update()
+            return
+        if self._pan is not None:
+            delta = event.globalPosition().toPoint() - self._pan["start"]
+            self._pan["hbar"].setValue(self._pan["h0"] - delta.x())
+            self._pan["vbar"].setValue(self._pan["v0"] - delta.y())
             return
         if self._obj_mode == "move" and 0 <= self._sel_obj < len(self._objects):
             self._move_object(self._objects[self._sel_obj], pos - self._obj_grab)
@@ -659,6 +822,10 @@ class PageView(QWidget):
         self._update_hover_cursor(pos)  # idle hover: context-sensitive cursor
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._pan is not None:
+            self._pan = None
+            self.setCursor(Qt.OpenHandCursor if self.tool == Tool.HAND else Qt.ArrowCursor)
+            return
         if self._obj_mode is not None:
             self._obj_mode = None
             self._obj_grab = None
@@ -713,20 +880,25 @@ class PageView(QWidget):
 
     def _update_hover_cursor(self, pos: QPoint) -> None:
         """Set the cursor based on what's under it (idle hover)."""
+        # A placed object (signature/image) is draggable in every tool, so its
+        # move/resize cursors take priority over the tool's own cursor.
+        corner = self._obj_corner_at(pos)
+        if corner in (0, 2):
+            self.setCursor(Qt.SizeFDiagCursor)
+            return
+        if corner in (1, 3):
+            self.setCursor(Qt.SizeBDiagCursor)
+            return
+        if self._hit_object(pos) >= 0:
+            self.setCursor(Qt.SizeAllCursor)          # move a placed object
+            return
         if self.tool == Tool.HAND:
             self.setCursor(Qt.OpenHandCursor)
             return
         if self.tool != Tool.SELECT:
             self.setCursor(Qt.CrossCursor)
             return
-        corner = self._obj_corner_at(pos)
-        if corner in (0, 2):
-            self.setCursor(Qt.SizeFDiagCursor)
-        elif corner in (1, 3):
-            self.setCursor(Qt.SizeBDiagCursor)
-        elif self._hit_object(pos) >= 0:
-            self.setCursor(Qt.SizeAllCursor)          # move a placed object
-        elif self._text_at(pos):
+        if self._text_at(pos):
             self.setCursor(Qt.IBeamCursor)            # over selectable text
         else:
             self.setCursor(Qt.ArrowCursor)            # plain mouse pointer
