@@ -99,12 +99,25 @@ class MainWindow(QMainWindow):
 
         self._comments_panel = self._build_comments_panel()
 
+        # Right area: a full-height rail on the inner edge of the Comments
+        # panel — click anywhere on it to collapse/expand the panel.
+        self._comments_rail = QToolButton()
+        self._comments_rail.setObjectName("thumbRail")
+        self._comments_rail.setAutoRaise(True)
+        self._comments_rail.setIcon(self._icon("next"))
+        self._comments_rail.setToolTip("Hide comments")
+        self._comments_rail.setCursor(Qt.PointingHandCursor)
+        self._comments_rail.setFixedWidth(18)
+        self._comments_rail.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self._comments_rail.clicked.connect(self._toggle_comments)
+
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._thumbs)
         layout.addWidget(self._thumb_rail)
         layout.addWidget(self._scroll, 1)
+        layout.addWidget(self._comments_rail)
         layout.addWidget(self._comments_panel)
         self.setCentralWidget(central)
 
@@ -1313,7 +1326,13 @@ class MainWindow(QMainWindow):
         )
 
     def _toggle_comments(self) -> None:
-        self._comments_panel.setVisible(not self._comments_panel.isVisible())
+        showing = self._comments_panel.isVisible()
+        self._comments_panel.setVisible(not showing)
+        # Arrow points the way the panel will move next.
+        self._comments_rail.setIcon(self._icon("prev" if showing else "next"))
+        self._comments_rail.setToolTip(
+            "Show comments" if showing else "Hide comments"
+        )
 
     def _set_tool(self, tool: Tool) -> None:
         self._view.tool = tool
