@@ -64,11 +64,15 @@ class _DetachableTabBar(QTabBar):
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         # Dragging a tab well above/below the bar tears it off into a window.
+        # Use global coordinates so the check is reliable even while Qt is
+        # running its own tab-reorder drag.
         if self._drag_index >= 0 and (event.buttons() & Qt.LeftButton):
-            y = event.position().toPoint().y()
-            if y < -24 or y > self.height() + 40:
+            gy = event.globalPosition().toPoint().y()
+            top = self.mapToGlobal(QPoint(0, 0)).y()
+            if gy < top - 30 or gy > top + self.height() + 30:
                 index = self._drag_index
                 self._drag_index = -1
+                self.releaseMouse()
                 self.detach_requested.emit(index, event.globalPosition().toPoint())
                 return
         super().mouseMoveEvent(event)
@@ -402,6 +406,15 @@ class MainWindow(QMainWindow):
         index = self._tabs.addTab(tab, "…")
         self._tabs.setCurrentIndex(index)
         self._load_document(doc)
+
+    def open_files_and_raise(self, paths: list) -> None:
+        """Open files forwarded from a second launch, then surface this window."""
+        for path in paths:
+            if path.strip():
+                self.open_document(path.strip())
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     # -- UI construction ------------------------------------------------
 

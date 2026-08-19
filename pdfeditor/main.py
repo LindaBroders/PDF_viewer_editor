@@ -7,6 +7,7 @@ import sys
 
 from PySide6.QtCore import QEvent, QObject, QTimer
 from PySide6.QtGui import QGuiApplication, QIcon
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -17,6 +18,66 @@ from PySide6.QtWidgets import (
 
 from .main_window import MainWindow
 from .theme import DARK_QSS
+
+# Named pipe/socket used to keep the app to a single instance, so a second
+# launch (e.g. double-clicking another PDF) opens a new tab in the running
+# window instead of starting a whole new window.
+_IPC_NAME = "pdf-viewer-editor.single-instance"
+
+
+def _forward_to_running_instance(files: list[str]) -> bool:
+    """If another instance is already running, hand it our files. Returns
+    True when the message was delivered (so this process should exit)."""
+    socket = QLocalSocket()
+    socket.connectToServer(_IPC_NAME)
+    if not socket.waitForConnected(250):
+        socket.abort()
+        return False
+    payload = ("OPEN\n" + "\n".join(files)).encode("utf-8")
+    socket.write(payload)
+    socket.flush()
+    socket.waitForBytesWritten(1000)
+    socket.disconnectFromServer()
+    if socket.state() != QLocalSocket.LocalSocketState.UnconnectedState:
+        socket.waitForDisconnected(500)
+    return True
+
+
+def _target_window(default: MainWindow) -> MainWindow:
+    """Pick a live window to receive forwarded files (prefer the active one)."""
+    active = QApplication.activeWindow()
+    if isinstance(active, MainWindow):
+        return active
+    if default is not None and default.isVisible():
+        return default
+    for widget in QApplication.topLevelWidgets():
+        if isinstance(widget, MainWindow) and widget.isVisible():
+            return widget
+    win = MainWindow()
+    win.show()
+    return win
+
+
+def _start_ipc_server(app: QApplication, window: MainWindow) -> None:
+    """Listen for future launches and open the files they forward."""
+    QLocalServer.removeServer(_IPC_NAME)  # clear a stale socket, if any
+    server = QLocalServer()
+    if not server.listen(_IPC_NAME):
+        return
+
+    def handle_connection() -> None:
+        conn = server.nextPendingConnection()
+        if conn is None:
+            return
+        if conn.waitForReadyRead(1000):
+            text = bytes(conn.readAll().data()).decode("utf-8", "ignore")
+            lines = text.split("\n")
+            paths = [ln for ln in lines[1:] if ln.strip()] if lines and lines[0] == "OPEN" else []
+            _target_window(window).open_files_and_raise(paths)
+        conn.disconnectFromServer()
+
+    server.newConnection.connect(handle_connection)
+    app._ipc_server = server  # keep a reference alive
 
 
 def _app_icon() -> QIcon:
@@ -77,6 +138,7 @@ class _FixedDialogFilter(QObject):
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
+    files = [os.path.abspath(a) for a in argv[1:] if not a.startswith("-")]
 
     # Set the app identity BEFORE constructing QApplication, so Qt registers the
     # right app ID with the desktop portal the first time (setting it afterwards
@@ -93,6 +155,12 @@ def main(argv: list[str] | None = None) -> int:
     QApplication.setOrganizationName("pdfeditor")
 
     app = QApplication(argv)
+
+    # Single instance: if the app is already running, forward our files to it
+    # (they open as new tabs there) and exit instead of opening a new window.
+    if _forward_to_running_instance(files):
+        return 0
+
     app.setStyle(_MinimalStyle(app.style()))  # flat dialog buttons (no icons)
     app.setWindowIcon(_app_icon())
     app.setStyleSheet(DARK_QSS)
@@ -105,9 +173,13 @@ def main(argv: list[str] | None = None) -> int:
     window.setWindowIcon(app.windowIcon())
     window.show()
 
-    # Open a file passed on the command line, or start with a blank document.
-    if len(argv) > 1:
-        window.open_document(argv[1])
+    # Listen for future launches so their files open here as tabs.
+    _start_ipc_server(app, window)
+
+    # Open files passed on the command line, or start with a blank document.
+    if files:
+        for path in files:
+            window.open_document(path)
     else:
         window.new_document()
 
