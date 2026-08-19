@@ -5,9 +5,9 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QPoint, QSettings, Qt, Signal
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QSettings, Qt, Signal
 from PySide6.QtGui import (
-    QAction, QColor, QCursor, QGuiApplication, QIcon, QImage, QKeySequence,
+    QAction, QColor, QCursor, QDrag, QGuiApplication, QIcon, QImage, QKeySequence,
     QPainter, QPixmap,
 )
 from PySide6.QtWidgets import (
@@ -42,8 +42,15 @@ from .viewer import PageView, Tool
 _PDF_FILTER = "PDF files (*.pdf);;All files (*)"
 
 
+# In-process registry for a tab being dragged between windows. The drag's
+# MIME payload carries only a token; the widget itself is looked up here.
+_TAB_MIME = "application/x-pdfeditor-tab"
+_DRAG_TABS: dict = {}
+
+
 class _DetachableTabBar(QTabBar):
-    """A tab bar whose tabs can be dragged out to become their own window."""
+    """A tab bar whose tabs can be reordered, dragged between windows, or
+    torn off into a new window."""
 
     detach_requested = Signal(int, QPoint)
     menu_requested = Signal(int, QPoint)
@@ -51,6 +58,7 @@ class _DetachableTabBar(QTabBar):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._drag_index = -1
+        self.setAcceptDrops(True)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         index = self.tabAt(event.pos())
@@ -63,23 +71,75 @@ class _DetachableTabBar(QTabBar):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        # Dragging a tab well above/below the bar tears it off into a window.
-        # Use global coordinates so the check is reliable even while Qt is
-        # running its own tab-reorder drag.
+        # Dragging a tab clear of the bar starts a cross-window drag; drop it
+        # on another window's tab bar to move it there, or in empty space to
+        # tear it off into a new window. Horizontal drags still reorder.
         if self._drag_index >= 0 and (event.buttons() & Qt.LeftButton):
             gy = event.globalPosition().toPoint().y()
             top = self.mapToGlobal(QPoint(0, 0)).y()
             if gy < top - 30 or gy > top + self.height() + 30:
                 index = self._drag_index
                 self._drag_index = -1
-                self.releaseMouse()
-                self.detach_requested.emit(index, event.globalPosition().toPoint())
+                self._start_cross_drag(index)
                 return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         self._drag_index = -1
         super().mouseReleaseEvent(event)
+
+    def _start_cross_drag(self, index: int) -> None:
+        tabw = self.parent()
+        main = getattr(tabw, "main_window", None)
+        tab = tabw.widget(index)
+        if tab is None or main is None:
+            return
+        token = str(id(tab))
+        _DRAG_TABS[token] = {
+            "tab": tab, "source": main,
+            "title": tabw.tabText(index), "tip": tabw.tabToolTip(index),
+            "consumed": False,
+        }
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(_TAB_MIME, token.encode())
+        drag.setMimeData(mime)
+        try:
+            drag.setPixmap(self.grab(self.tabRect(index)))
+        except Exception:  # pragma: no cover
+            pass
+        self.releaseMouse()
+        drag.exec(Qt.MoveAction)
+        entry = _DRAG_TABS.pop(token, None)
+        if entry and not entry["consumed"]:
+            # Dropped somewhere that didn't accept it -> new window, but only
+            # if it isn't already the sole tab of its window.
+            if tabw.count() > 1:
+                main._detach_widget(tab, entry["title"], entry["tip"], QCursor.pos())
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasFormat(_TAB_MIME):
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasFormat(_TAB_MIME):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        if not event.mimeData().hasFormat(_TAB_MIME):
+            return
+        token = bytes(event.mimeData().data(_TAB_MIME).data()).decode()
+        entry = _DRAG_TABS.get(token)
+        target = getattr(self.parent(), "main_window", None)
+        if entry is None or target is None:
+            return
+        index = self.tabAt(event.position().toPoint())
+        if index < 0:
+            index = self.count()
+        target._accept_tab(entry["tab"], entry["title"], entry["tip"], index)
+        entry["consumed"] = True
+        event.setDropAction(Qt.MoveAction)
+        event.acceptProposedAction()
 
 
 class _DetachableTabWidget(QTabWidget):
@@ -90,6 +150,7 @@ class _DetachableTabWidget(QTabWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.main_window = None  # set by MainWindow
         bar = _DetachableTabBar(self)
         self.setTabBar(bar)
         self.setMovable(True)
@@ -270,6 +331,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("PDF Viewer & Editor")
         self.resize(1200, 800)
+        if self not in MainWindow._windows:
+            MainWindow._windows.append(self)
 
         self._max_history = 40
         # Author name stamped on new comments/notes/highlights (persisted).
@@ -278,6 +341,7 @@ class MainWindow(QMainWindow):
         # One tab per open PDF; tabs can be reordered, closed, and torn off
         # into their own window.
         self._tabs = _DetachableTabWidget()
+        self._tabs.main_window = self
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._tabs.tabCloseRequested.connect(self._close_tab)
         self._tabs.detach_requested.connect(self._detach_tab)
@@ -771,27 +835,91 @@ class MainWindow(QMainWindow):
             return
         if self._tabs.count() <= 1:
             return  # nothing gained by detaching the only tab
-        title = self._tabs.tabText(index)
-        tip = self._tabs.tabToolTip(index)
-        self._tabs.removeTab(index)          # reparents the widget out
+        self._detach_widget(tab, self._tabs.tabText(index),
+                            self._tabs.tabToolTip(index), global_pos)
+
+    def _detach_widget(self, tab: "DocumentTab", title: str, tip: str,
+                       global_pos: QPoint) -> None:
+        """Move a specific tab into a brand-new window."""
+        i = self._tabs.indexOf(tab)
+        if i >= 0:
+            self._tabs.removeTab(i)          # reparents the widget out
         win = MainWindow()
-        win._adopt_tab(tab, title, tip)
         win.resize(self.size())
         win.move(global_pos - QPoint(120, 20))
         win.show()
-        MainWindow._windows.append(win)
+        win._adopt_tab(tab, title, tip)
+        self._close_if_empty()
+
+    def _accept_tab(self, tab: "DocumentTab", title: str, tip: str,
+                    index: int) -> None:
+        """Take a tab dragged in from another window and insert it here."""
+        source = tab.win
+        if source is not None and source is not self:
+            si = source._tabs.indexOf(tab)
+            if si >= 0:
+                source._tabs.removeTab(si)
+        else:
+            si = self._tabs.indexOf(tab)   # same-window move
+            if si >= 0:
+                self._tabs.removeTab(si)
+                if si < index:
+                    index -= 1
+        tab.win = self
+        index = max(0, min(index, self._tabs.count()))
+        self._tabs.insertTab(index, tab, title)
+        if tip:
+            self._tabs.setTabToolTip(index, tip)
+        self._tabs.setCurrentIndex(index)
+        self._on_tab_changed(index)
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if source is not None and source is not self:
+            source._close_if_empty()
+
+    def _close_if_empty(self) -> None:
+        """Close this window if it has no tabs left (e.g. after moving its
+        last tab elsewhere) — but never the very last window open."""
+        if self._tabs.count() == 0 and len(MainWindow._windows) > 1:
+            self.close()
 
     def _tab_menu(self, index: int, global_pos: QPoint) -> None:
+        tab = self._tabs.widget(index)
+        title = self._tabs.tabText(index)
+        tip = self._tabs.tabToolTip(index)
         menu = QMenu(self)
         act_detach = menu.addAction("Move to New Window")
         act_detach.setEnabled(self._tabs.count() > 1)
+
+        # Submenu: move this tab into any other open window.
+        others = [w for w in MainWindow._windows if w is not self and w.isVisible()]
+        move_acts = {}
+        if others:
+            sub = menu.addMenu("Move to Window")
+            for w in others:
+                label = w._window_menu_label()
+                act = sub.addAction(label)
+                move_acts[act] = w
         menu.addSeparator()
         act_close = menu.addAction("Close Tab")
+
         chosen = menu.exec(global_pos)
+        if chosen is None:
+            return
         if chosen == act_detach:
             self._detach_tab(index, global_pos)
         elif chosen == act_close:
             self._close_tab(index)
+        elif chosen in move_acts and isinstance(tab, DocumentTab):
+            move_acts[chosen]._accept_tab(tab, title, tip, move_acts[chosen]._tabs.count())
+
+    def _window_menu_label(self) -> str:
+        """A short label naming this window by its current tab."""
+        idx = self._tabs.currentIndex()
+        if idx >= 0:
+            return self._tabs.tabText(idx).lstrip("• ") or "Window"
+        return "Window"
 
     def _adopt_tab(self, tab: DocumentTab, title: str, tip: str = "") -> None:
         """Take ownership of a tab detached from another window."""
