@@ -937,11 +937,7 @@ class PdfDocument:
     # -- persistence ----------------------------------------------------
 
     def save(self, path: Optional[str] = None) -> str:
-        """Save the document. Saves in place when ``path`` is omitted.
-
-        Uses incremental save when writing back to the same file and a full
-        (garbage-collected) save otherwise.
-        """
+        """Save the document. Saves in place when ``path`` is omitted."""
         target = path or self.path
         if not target:
             raise DocumentError("No path given and document has no path.")
@@ -949,13 +945,20 @@ class PdfDocument:
         same_file = self.path is not None and os.path.abspath(target) == os.path.abspath(
             self.path
         )
-        try:
-            if same_file:
-                self._doc.save(target, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-            else:
-                self._doc.save(target, garbage=4, deflate=True)
-        except Exception as exc:
-            # Incremental save can fail (e.g. file grew); retry as a full save.
+        if same_file:
+            # NEVER let PyMuPDF do a full save straight onto the file it
+            # currently has open — that can corrupt the file ("non-page object
+            # in page tree"), especially after redactions/annotation edits.
+            # Serialize to memory first (independent of the open file), then
+            # overwrite atomically.
+            data = self._doc.tobytes(
+                garbage=4, deflate=True, encryption=fitz.PDF_ENCRYPT_KEEP
+            )
+            tmp = target + ".part"
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, target)
+        else:
             self._doc.save(target, garbage=4, deflate=True)
         self.path = target
         self.dirty = False
