@@ -124,6 +124,7 @@ class PageView(QWidget):
         self._obj_mode: Optional[str] = None          # None | "move" | "resize"
         self._obj_corner = -1
         self._obj_grab: Optional[QPoint] = None        # move offset (widget px)
+        self._resize_anchor: Optional[tuple] = None    # fixed corner (PDF pts)
 
         # Live PDF annotations (comments/notes/highlights/free-text) are the
         # real thing in the file — selected/moved/edited here, never flattened.
@@ -173,7 +174,7 @@ class PageView(QWidget):
 
     # -- image / signature objects (editable overlay) -------------------
 
-    HANDLE = 9  # corner handle size (px)
+    HANDLE = 11  # corner handle size (px)
 
     def begin_placement(self, pixmap: QPixmap, path: str) -> None:
         """Start placing an image: it rides the cursor until clicked to drop."""
@@ -363,7 +364,7 @@ class PageView(QWidget):
         if wr is None:
             return -1
         for i, h in enumerate(self._obj_handles(wr)):
-            if h.adjusted(-3, -3, 3, 3).contains(pt):
+            if h.adjusted(-7, -7, 7, 7).contains(pt):   # generous grab area
                 return i
         return -1
 
@@ -383,35 +384,52 @@ class PageView(QWidget):
             (wr.right() - pg["x"]) / self._zoom, (wr.bottom() - pg["y"]) / self._zoom,
         ]
 
+    def _resize_anchor_for(self, o: dict) -> tuple:
+        """PDF-coordinate corner that stays fixed while dragging ``_obj_corner``
+        (0=TL, 1=TR, 2=BR, 3=BL) — i.e. the opposite corner."""
+        x0, y0, x1, y1 = o["rect"]
+        ax = x1 if self._obj_corner in (0, 3) else x0
+        ay = y1 if self._obj_corner in (0, 1) else y0
+        return (ax, ay)
+
     def _move_object(self, o: dict, top_left: QPoint) -> None:
         wr = self._object_widget_rect(o)
         if wr is None:
             return
-        moved = QRect(top_left, wr.size())
         # Re-home the object to whichever page its center now sits on.
-        page = self._hit_test(moved.center())
+        page = self._hit_test(QRect(top_left, wr.size()).center())
         if page is not None:
             o["page"] = page["index"]
-        self._set_object_rect_from_widget(o, moved)
+        pg = self._page_layout(o["page"])
+        if pg is None:
+            return
+        # Translate in float PDF space, preserving the exact size (no rounding
+        # drift from bouncing through integer widget rects each mouse-move).
+        x0, y0, x1, y1 = o["rect"]
+        w, h = x1 - x0, y1 - y0
+        nx0 = (top_left.x() - pg["x"]) / self._zoom
+        ny0 = (top_left.y() - pg["y"]) / self._zoom
+        o["rect"] = [nx0, ny0, nx0 + w, ny0 + h]
 
     def _resize_object(self, o: dict, pt: QPoint) -> None:
-        wr = self._object_widget_rect(o)
-        if wr is None:
+        pg = self._page_layout(o["page"])
+        if pg is None or self._resize_anchor is None:
             return
-        corners = [wr.topLeft(), wr.topRight(), wr.bottomRight(), wr.bottomLeft()]
-        anchor = corners[(self._obj_corner + 2) % 4]
+        ax, ay = self._resize_anchor          # fixed corner, PDF coords
+        px = (pt.x() - pg["x"]) / self._zoom   # pointer in PDF coords
+        py = (pt.y() - pg["y"]) / self._zoom
         pm = o["pixmap"]
         ar = pm.width() / max(1, pm.height())
-        w = max(20, abs(pt.x() - anchor.x()))
-        h = max(20, abs(pt.y() - anchor.y()))
+        w = max(10.0, abs(px - ax))
+        h = max(10.0, abs(py - ay))
+        # Keep the image's aspect ratio.
         if w / h > ar:
-            w = int(h * ar)
+            w = h * ar
         else:
-            h = int(w / ar)
-        sx = 1 if pt.x() >= anchor.x() else -1
-        sy = 1 if pt.y() >= anchor.y() else -1
-        new = QRect(anchor, QPoint(anchor.x() + sx * w, anchor.y() + sy * h)).normalized()
-        self._set_object_rect_from_widget(o, new)
+            h = w / ar
+        nx = ax + (w if px >= ax else -w)
+        ny = ay + (h if py >= ay else -h)
+        o["rect"] = [min(ax, nx), min(ay, ny), max(ax, nx), max(ay, ny)]
 
     def copy_selection(self) -> bool:
         """Copy the selected text to the clipboard. Returns True if any."""
@@ -722,6 +740,8 @@ class PageView(QWidget):
         if corner >= 0:
             self._obj_mode = "resize"
             self._obj_corner = corner
+            # Lock the opposite corner once; the drag resizes toward the cursor.
+            self._resize_anchor = self._resize_anchor_for(self._objects[self._sel_obj])
             return
         hit = self._hit_object(pos)
         if hit >= 0:
@@ -878,6 +898,7 @@ class PageView(QWidget):
         if self._obj_mode is not None:
             self._obj_mode = None
             self._obj_grab = None
+            self._resize_anchor = None
             self.objects_changed.emit()
             return
         if not self._doc or self._drag_start is None or self._active is None:
