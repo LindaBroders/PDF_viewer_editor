@@ -349,9 +349,10 @@ class MainWindow(QMainWindow):
         self._tabs.menu_requested.connect(self._tab_menu)
         self.setCentralWidget(self._tabs)
 
-        # Editable page indicator: type a page number (or use the arrows) to
-        # jump straight to it. The total shows as a suffix, e.g. "5 / 12".
-        self._page_prefix = QLabel("Page")
+        # Editable page indicator (added to the toolbar in _build_toolbar):
+        # type a page number (or use the arrows) to jump straight to it. The
+        # total shows as a suffix, e.g. "5 / 12".
+        self._page_prefix = QLabel(" Page ")
         self._page_spin = QSpinBox()
         self._page_spin.setObjectName("pageSpin")
         self._page_spin.setMinimum(0)
@@ -360,8 +361,6 @@ class MainWindow(QMainWindow):
         self._page_spin.setAlignment(Qt.AlignRight)
         self._page_spin.setToolTip("Current page — type a number to jump there")
         self._page_spin.valueChanged.connect(self._on_page_spin_changed)
-        self.statusBar().addPermanentWidget(self._page_prefix)
-        self.statusBar().addPermanentWidget(self._page_spin)
 
         self._build_actions()
         self._build_menus()
@@ -679,6 +678,8 @@ class MainWindow(QMainWindow):
         tb.addActions([self.act_zoom_out, self.act_fit_width, self.act_zoom_in])
         tb.addSeparator()
         tb.addActions([self.act_prev, self.act_next])
+        tb.addWidget(self._page_prefix)
+        tb.addWidget(self._page_spin)
         tb.addSeparator()
 
         # Tool selector.
