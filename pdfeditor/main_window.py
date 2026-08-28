@@ -350,17 +350,20 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._tabs)
 
         # Editable page indicator (added to the toolbar in _build_toolbar):
-        # type a page number (or use the arrows) to jump straight to it. The
-        # total shows as a suffix, e.g. "5 / 12".
+        # type a page number in the box (or use its arrows) to jump there. The
+        # total page count sits in a separate, non-editable label after it.
         self._page_prefix = QLabel(" Page ")
         self._page_spin = QSpinBox()
         self._page_spin.setObjectName("pageSpin")
         self._page_spin.setMinimum(0)
         self._page_spin.setMaximum(0)
         self._page_spin.setKeyboardTracking(False)  # fire only on Enter/arrows
-        self._page_spin.setAlignment(Qt.AlignRight)
+        self._page_spin.setAlignment(Qt.AlignHCenter)
+        self._page_spin.setFixedWidth(72)
         self._page_spin.setToolTip("Current page — type a number to jump there")
         self._page_spin.valueChanged.connect(self._on_page_spin_changed)
+        self._page_total = QLabel("/ 0 ")
+        self._page_total.setObjectName("pageTotal")
 
         self._build_actions()
         self._build_menus()
@@ -680,6 +683,7 @@ class MainWindow(QMainWindow):
         tb.addActions([self.act_prev, self.act_next])
         tb.addWidget(self._page_prefix)
         tb.addWidget(self._page_spin)
+        tb.addWidget(self._page_total)
         tb.addSeparator()
 
         # Tool selector.
@@ -2366,14 +2370,14 @@ class MainWindow(QMainWindow):
             spin.setEnabled(True)
             spin.setMinimum(1)
             spin.setMaximum(count)
-            spin.setSuffix(f" / {count}")
             spin.setValue(self._view.page_index + 1)
+            self._page_total.setText(f"/ {count} ")
         else:
             spin.setEnabled(False)
             spin.setMinimum(0)
             spin.setMaximum(0)
-            spin.setSuffix("")
             spin.setValue(0)
+            self._page_total.setText("/ 0 ")
         spin.blockSignals(False)
 
     def _on_page_spin_changed(self, value: int) -> None:

@@ -8,10 +8,15 @@ from __future__ import annotations
 
 import os
 
-# Path to the drop-down chevron asset (forward slashes for the Qt style sheet).
-_CHEVRON = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "packaging", "icons", "chevron-down.png")
-).replace("\\", "/")
+# Paths to the chevron assets (forward slashes for the Qt style sheet).
+def _asset(name: str) -> str:
+    return os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "packaging", "icons", name)
+    ).replace("\\", "/")
+
+
+_CHEVRON = _asset("chevron-down.png")
+_CHEVRON_UP = _asset("chevron-up.png")
 
 # Palette
 BG = "#2b2f34"          # window background (medium-dark grey)
@@ -207,6 +212,37 @@ QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox {{
 }}
 QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
     border-color: {ACCENT};
+}}
+
+/* Spin-box up/down buttons (styling a QSpinBox hides them unless we do this) */
+QSpinBox, QDoubleSpinBox {{
+    padding-right: 20px;   /* room for the buttons */
+}}
+QSpinBox::up-button, QDoubleSpinBox::up-button {{
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 18px;
+    border-left: 1px solid {BORDER};
+    border-top-right-radius: 8px;
+    background: {SURFACE_ALT};
+}}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 18px;
+    border-left: 1px solid {BORDER};
+    border-bottom-right-radius: 8px;
+    background: {SURFACE_ALT};
+}}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
+    background: {ACCENT};
+}}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+    image: url("{_CHEVRON_UP}"); width: 9px; height: 9px;
+}}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+    image: url("{_CHEVRON}"); width: 9px; height: 9px;
 }}
 
 /* Thumbnail list */
